@@ -14,10 +14,11 @@
 #include "lib/sha1.h"
 #include "lib/base64.h"
 
-#define _PORT_			8000
-#define _QUEUE_LENGTH_	16
-#define _MAX_CLIENT		32
-#define _BUFFER_SIZE	4*1024//4KB
+#define _PORT_					8000
+#define _MAX_CLIENT				32
+#define _BUFFER_SIZE			4*1024//4KB
+#define _QUEUE_LENGTH_			16
+#define _WS_SPECIFICATION_GUID	"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 typedef enum _bool {false=0, true=1} bool;
 typedef struct sockaddr_in sockaddr_in;
@@ -33,12 +34,26 @@ typedef struct _dual_sock_conn{
 	bool	newfdw_flag;	// flag used to indicate if the fdw correspond to a new webSocket (fdw)
 } dual_sock_conn;
 
-int fdMax;							// used in select (stores the biggest file descriptor assigned to this process so far)
-int fdsReady;						// used in select (number of fds that have changed)
-fd_set fdReadSocks, fdWriteSocks;	// used in select (set of fds we are going to wait for events to happen --write/read)
-sockaddr_in serverAddress;			// address the listener socket is going to be binded to
-dual_sock_conn conns[_MAX_CLIENT];	// array of paired connections (webSocket, userSocket) needed for the 1 to 1 map
+//SELECT
+int fdMax;							// stores the biggest file descriptor assigned to this process so far
+int fdsReady;						// number of fds that have changed
+fd_set fdReadSocks, fdWriteSocks;	// set of fds we are going to wait for events to happen --write/read
+
+//Server socket
 int fdServerSock;					// fd for the server socket (i.e the listen()-er socket)
+sockaddr_in serverAddress;			// address the listen()-er socket is going to be binded to
+
+//Connections
+dual_sock_conn conns[_MAX_CLIENT];	// array of paired connections (webSocket, userSocket) needed for the 1 to 1 map
+
+//WebSocket handshake
+regex_t regex_wsInitialMsg;			// compiled regular expression for detecting websocket handshake from web browser
+regmatch_t matchs[4];				// stores the substrings matching the subpatterns inside parenthesis
+char fullWebSocketKey[60];//[24+36+1]// Sec-WebSocket-Key base64-encoded value (when decoded, is 16 bytes in length)
+unsigned char* KeyHash;				// Stores the SHA1(fullWebSocketKey) 160 bits value for the server handshake replay
+char secWebsocketAccept[29];		// Stores the Base64(SHA1(fullWebSocketKey))
+char handshakeMessage[126];			// Stores the full handshake message to be sent to the WebSocket
+
 
 //"tells the Kernel that this process does not need to wait for (block until) this socket to complete reading/writing"
 void setNonBlockingFlag(int fdSock){
@@ -199,15 +214,14 @@ void onUSReceiveEventHandler(dual_sock_conn* sockConn){
 		"couldn't receive data"
 	);
 
+	// if the other side closed the socket
 	if (bytesRecv == 0){
-		/* This means the other side closed the socket */
 		printf("[socket fd:%d]\tother side closed the socket\n", sockConn->fdu);
 
 		close(sockConn->fdu);
 		if (sockConn->fdw){
 			char const* msg = "_ERROR: Program Agent was closed by other side";
 			memcpy( sockConn->utowBuffer, msg, strlen(msg)+1 );
-			//close(sockConn->fdw);
 		}
 
 		sockConn->fdu = sockConn->wtouBuffer[0] = 0;
@@ -217,9 +231,7 @@ void onUSReceiveEventHandler(dual_sock_conn* sockConn){
 		printf("[socket fd:%d]\tdata received is:\n%s\n", sockConn->fdu, buffer);
 
 		// if what we have received is a web socket message
-		if ( strstr(buffer, "Upgrade: websocket") ){
-			char const* msg;
-
+		if ( !regexec(&regex_wsInitialMsg, buffer, regex_wsInitialMsg.re_nsub+1, matchs, 0) ){
 			printf("[socket fd:%d]\tWebSocket detected\n", sockConn->fdu);
 
 			for (i=0; i < _MAX_CLIENT; ++i)
@@ -244,11 +256,27 @@ void onUSReceiveEventHandler(dual_sock_conn* sockConn){
 				printf("[server socket]\tnew WebSocket %d waiting for incoming user sockets\n", sockConn->fdw);
 			}
 
-			//sending data to the web socket asynchronously
-			//WebSocket handshake!
-			msg= "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: YzNlODAwMGU1NWRjYzg5NmNjZmNlZGIzZWNkNzViMWUyMmFhMjIyYQ==\r\n\r\n";
-			memcpy( sockConn->utowBuffer, msg, strlen(msg)+1 );
+			//WEBSOCKET OPENING HANDSHAKE [RFC 6455 4.2.1-2]
+			//1) capturing the Sec-WebSocket-Key value (stores it in fullWebSocketKey)
+			if (matchs[2].rm_so == -1)
+				memcpy((void *)&matchs[2], (void *)&matchs[3], sizeof(regmatch_t));
+			memcpy(fullWebSocketKey, buffer + matchs[2].rm_so, 24);
 
+			//2) concatenating fullWebSocketKey with the GUID "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+			memcpy(fullWebSocketKey + 24, _WS_SPECIFICATION_GUID, 36);
+
+			//3)  taking the SHA-1 hash of this concatenated value to obtain a 20-byte value
+			KeyHash = SHA1(fullWebSocketKey, 60);
+
+			//4) and base64-encoding this 20-byte hash
+			base64encode(KeyHash , 20, secWebsocketAccept, 29);
+
+			//5) sending the handshake message to the web socket asynchronously
+			strcpy(handshakeMessage, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ");
+			strcat(handshakeMessage, secWebsocketAccept);
+			strcat(handshakeMessage, "\r\n\r\n");
+
+			memcpy( sockConn->utowBuffer, handshakeMessage, strlen(handshakeMessage)+1 );
 		}else{
 			//if is not ws and user socket doesnt have a ws to exchange data with, try to find a free ws for it
 			if (!sockConn->fdw){
@@ -287,7 +315,13 @@ void onUStoWSSendEventHandler(dual_sock_conn* sockConn){
 }
 
 int main(int argc, char const* argv[]){
-	printf("Tileworld WebSocket proxy server running at port %d\nSergio Burdisso - 2014\n\n", _PORT_);
+	printf("\nTileworld WebSocket proxy server running at port %d\nSergio Burdisso - 2014\n\n", _PORT_);
+
+	regcomp(
+		&regex_wsInitialMsg,
+		"GET[ \t].*(\r\nUpgrade[ \t]*:[ \t]*websocket.*\r\nSec-WebSocket-Key[ \t]*:[ \t]*([^\r\t ]*)|\r\nSec-WebSocket-Key[ \t]*:[ \t]*([^\r\t ]*).*\nUpgrade[ \t]*:[ \t]*websocket).*",
+		REG_ICASE | REG_EXTENDED
+	);
 
 	fdServerSock =socket(
 					AF_INET 	/*Internet domain sockets (IPv4)*/,
@@ -363,6 +397,7 @@ int main(int argc, char const* argv[]){
 	}//infinite loop
 
 	close(fdServerSock);
+	regfree(&regex_wsInitialMsg);
 
 	return 0;
 }//main

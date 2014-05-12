@@ -441,10 +441,10 @@ void SHA1PadMessage(SHA1Context *context)
     SHA1ProcessMessageBlock(context);
 }
 
-unsigned char* SHA1(const char* input){
+unsigned char* SHA1(const char* input, int len){
     unsigned char *buf = (unsigned char*)calloc(20, sizeof(unsigned char)); //160-bits
     SHA1Context sha;
-    int i, len = strlen(input);
+    int i;
     
     buf[0] = 0;
     
