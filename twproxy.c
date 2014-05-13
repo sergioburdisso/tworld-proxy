@@ -158,6 +158,8 @@ void newConnectionEventHandler(){
 void onWSReceiveEventHandler(dual_sock_conn* sockConn){
 	int i, bytesRecv;
 	char buffer[_BUFFER_SIZE];
+	uint64_t payloadLength;
+	unsigned char iMaskingKey, iPayloadData;
 
 	printf("[socket fd:%d]\tWebSocket receives data\n", sockConn->fdw);
 
@@ -184,9 +186,10 @@ void onWSReceiveEventHandler(dual_sock_conn* sockConn){
 
 		printf("[socket fd:%d]\tdata received is:\n%s\n", sockConn->fdw, buffer);
 
-		if (!sockConn->fdu){//if ws socket doesnt have a user to exchange data with, try to find a free user for it
+		//if ws socket doesnt have a user to exchange data with, try to find a free user for it
+		if (!sockConn->fdu){
 			for (i=0; i < _MAX_CLIENT; ++i)
-				if ( !conns[i].fdw && conns[i].fdu ){ //a user waiting for a web socket!
+				if ( !conns[i].fdw && conns[i].fdu ){ //if a user is waiting for a web socket!
 					conns[i].fdw = sockConn->fdw;
 					sockConn->fdw = 0;
 					sockConn = &conns[i];
@@ -194,9 +197,47 @@ void onWSReceiveEventHandler(dual_sock_conn* sockConn){
 				}
 		}
 
+		//WebSocket Message (see section 5 "Data Framing" from the RFC 6455) 
+		printf(
+			"\n\n------------------------\n|%d|%d|%d|%d|x%x\t|%d|x%x\t|\n",
+			(buffer[0]&0x80)? 1 : 0,	// FIN bit
+			(buffer[0]&0x40)? 1 : 0,	// RSV1 bit
+			(buffer[0]&0x20)? 1 : 0,	// RSV2 bit
+			(buffer[0]&0x10)? 1 : 0,	// RSV3 bit
+			buffer[0]&0x01,				// opcode (4 bits)
+
+			(buffer[1]&0x80)? 1 : 0,	// MASK bit
+			buffer[1]&0x7F				// Payload len (7 bits)
+		);
+
+		iMaskingKey = 2;
+
+		switch (buffer[1]&0x7F/*Payload len*/){
+			case 126:
+				payloadLength = ntohs( *(uint16_t *)&buffer[2] );
+				iMaskingKey += 2;// 16 bits = 2 bytes
+				break;
+			case 127:
+				payloadLength = /*ntohll*/ntohl( *(uint64_t *)&buffer[2] );
+				iMaskingKey += 8;// 64 bits = 8 bytes
+				break;
+			default:
+				payloadLength = buffer[1]&0x7F;
+		}
+		iPayloadData = iMaskingKey + 4;// 4 bytes = 32 bits
+
+		//unmasking the receive payload data [RFC 6455 5.3]
+		for (i=0; i < payloadLength; ++i)
+			buffer[iPayloadData+i] = buffer[iPayloadData+i] ^ buffer[iMaskingKey + i%4];
+
+		buffer[iPayloadData + payloadLength] = 0;
+
+		//printf("payload data: %s\n", buffer + 6);
+		printf("payloadLength= %d (%x);\n\n", payloadLength);
+
 		//sending data to the web socket asynchronously
 		if (sockConn->fdu)
-			memcpy(sockConn->wtouBuffer, buffer/*<- build ws protocol packet with this data in it*/, bytesRecv + 1);
+			memcpy(sockConn->wtouBuffer, buffer + iPayloadData, payloadLength+1);
 		else
 			printf("[socket fd:%d]\tno user socket to send\n", sockConn->fdw);
 	}
@@ -272,7 +313,13 @@ void onUSReceiveEventHandler(dual_sock_conn* sockConn){
 			base64encode(KeyHash , 20, secWebsocketAccept, 29);
 
 			//5) sending the handshake message to the web socket asynchronously
-			strcpy(handshakeMessage, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ");
+			strcpy(
+				handshakeMessage,
+				"HTTP/1.1 101 Switching Protocols\r\n"
+				"Upgrade: websocket\r\n"
+				"Connection: Upgrade\r\n"
+				"Sec-WebSocket-Accept: "
+			);
 			strcat(handshakeMessage, secWebsocketAccept);
 			strcat(handshakeMessage, "\r\n\r\n");
 
@@ -319,7 +366,9 @@ int main(int argc, char const* argv[]){
 
 	regcomp(
 		&regex_wsInitialMsg,
-		"GET[ \t].*(\r\nUpgrade[ \t]*:[ \t]*websocket.*\r\nSec-WebSocket-Key[ \t]*:[ \t]*([^\r\t ]*)|\r\nSec-WebSocket-Key[ \t]*:[ \t]*([^\r\t ]*).*\nUpgrade[ \t]*:[ \t]*websocket).*",
+		"GET[ \t].*"
+		"(\r\nUpgrade[ \t]*:[ \t]*websocket.*\r\nSec-WebSocket-Key[ \t]*:[ \t]*([^\r\t ]*)|"
+		"\r\nSec-WebSocket-Key[ \t]*:[ \t]*([^\r\t ]*).*\nUpgrade[ \t]*:[ \t]*websocket).*",
 		REG_ICASE | REG_EXTENDED
 	);
 
