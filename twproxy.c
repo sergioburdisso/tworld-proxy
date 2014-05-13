@@ -156,6 +156,19 @@ void newConnectionEventHandler(){
 		setNonBlockingFlag(fdConnect);
 }
 
+void closeWS(dual_sock_conn* sockConn){
+	printf("[socket fd:%d]\tother side closed the socket\n", sockConn->fdw);
+
+	close(sockConn->fdw);
+
+	if (sockConn->fdu){
+		char const* msg = "_ERROR_: Tileworld instance was closed by other side";
+		memcpy( sockConn->wtouBuffer, msg, strlen(msg)+1 );
+	}
+
+	sockConn->fdw = sockConn->utowBuffer[0] = 0;
+}
+
 void onWSReceiveEventHandler(dual_sock_conn* sockConn){
 	char			buffer[_BUFFER_SIZE];
 	uint64_t		payloadLength;
@@ -171,18 +184,9 @@ void onWSReceiveEventHandler(dual_sock_conn* sockConn){
 	);
 
 	// if the other side closed the socket
-	if (bytesRecv == 0){
-		printf("[socket fd:%d]\tother side closed the socket\n", sockConn->fdw);
-
-		close(sockConn->fdw);
-
-		if (sockConn->fdu){
-			char const* msg = "_ERROR_: Tileworld instance was closed by other side";
-			memcpy( sockConn->wtouBuffer, msg, strlen(msg)+1 );
-		}
-
-		sockConn->fdw = sockConn->utowBuffer[0] = 0;
-	}else{
+	if (bytesRecv == 0)
+		closeWS(sockConn);
+	else{
 		buffer[bytesRecv] = 0;
 
 		printf("[socket fd:%d]\tdata received is:\n%s\n", sockConn->fdw, buffer);
@@ -197,60 +201,90 @@ void onWSReceiveEventHandler(dual_sock_conn* sockConn){
 					break;
 				}
 		}
+		
+		//WEBSOCKET MESSAGE (see section 5 "Data Framing" from the RFC 6455) 
+		
+		//lookup the OpCode
+		switch ( buffer[0]&0x0F ){
 
-		//WebSocket Message (see section 5 "Data Framing" from the RFC 6455) 
-		/*printf(
-			"\n\nraw websocket message:\n------------------------\n|%d|%d|%d|%d|x%x\t|%d|x%x\t|\n",
-			(buffer[0]&0x80)? 1 : 0,	// FIN bit
-			(buffer[0]&0x40)? 1 : 0,	// RSV1 bit
-			(buffer[0]&0x20)? 1 : 0,	// RSV2 bit
-			(buffer[0]&0x10)? 1 : 0,	// RSV3 bit
-			buffer[0]&0x01,				// opcode (4 bits)
+			case 1: // Text frame
+				iMaskingKey = 2;
 
-			(buffer[1]&0x80)? 1 : 0,	// MASK bit
-			buffer[1]&0x7F				// Payload len (7 bits)
-		);*/
+				switch (buffer[1]&0x7F/*Payload len*/){
+					case 126:
+						payloadLength = ntohs( *(uint16_t *)&buffer[2] );
+						iMaskingKey += 2;// 16 bits = 2 bytes
+						break;
+					case 127:
+						payloadLength = /*ntohll*/ntohl( *(uint64_t *)&buffer[2] );
+						iMaskingKey += 8;// 64 bits = 8 bytes
+						break;
+					default:
+						payloadLength = buffer[1]&0x7F;
+				}
+				iPayloadData = iMaskingKey + 4;// 4 bytes = 32 bits
 
-		//opcode != 1
-		/*if (buffer[0]&0x80 != 1)
-			agregar al buffer y esperar hasta que sea 1
-		else
-			enviar el buffer*/
+				//IF MASK bit
+				if (buffer[1]&0x80)
+					//unmasking the receive payload data [RFC 6455 5.3]
+					for (i=0; i < payloadLength; ++i)
+						buffer[iPayloadData+i] = buffer[iPayloadData+i] ^ buffer[iMaskingKey + i%4];
+				/*else
+					error "client messages must be masked*/
 
-		/*if (buffer[0]&0x01 != 1)
-			enviar(close frame con codigo 1003 7.4.1.  Defined Status Codes)*/
+				buffer[iPayloadData + payloadLength] = 0;
 
-		/*if (buffer[1]&0x80 == 0)// MASK bit) no se admiten mensajes sin mascara
-			enviar(close frame con codigo VER CODIGO 7.4.1.  Defined Status Codes)*/
+				//sending data to the web socket asynchronously
+				if (sockConn->fdu){
+					unsigned int offset = strlen(sockConn->wtouBuffer + 1);
+					char head = sockConn->wtouBuffer[offset];
 
-		iMaskingKey = 2;
+					//if FIN bit is 1
+					if (buffer[0]&0x80){
+						if (offset == 0)
+							memcpy(sockConn->wtouBuffer, buffer + iPayloadData, payloadLength);
+						else{
+							memcpy(sockConn->wtouBuffer + offset, buffer + iPayloadData, payloadLength);
+							sockConn->wtouBuffer[0] = head;
+						}
+						sockConn->wtouBuffer[offset + payloadLength] = 0;
+					}else
+					//if FIN bit is 0
 
-		switch (buffer[1]&0x7F/*Payload len*/){
-			case 126:
-				payloadLength = ntohs( *(uint16_t *)&buffer[2] );
-				iMaskingKey += 2;// 16 bits = 2 bytes
+						if (offset == 0){
+							memcpy(sockConn->wtouBuffer + 1, buffer + iPayloadData + 1, payloadLength-1);
+							sockConn->wtouBuffer[payloadLength] = buffer[iPayloadData];
+							sockConn->wtouBuffer[payloadLength + 1] = 0;
+						}else{
+							memcpy(sockConn->wtouBuffer + offset, buffer + iPayloadData, payloadLength);
+							sockConn->wtouBuffer[offset + payloadLength] = head;
+							sockConn->wtouBuffer[offset + payloadLength+ 1] = 0;
+						}
+				}else
+					printf("[socket fd:%d]\tno user socket to send\n", sockConn->fdw);
 				break;
-			case 127:
-				payloadLength = /*ntohll*/ntohl( *(uint64_t *)&buffer[2] );
-				iMaskingKey += 8;// 64 bits = 8 bytes
+
+			case 8: //Close frame
+				closeWS(sockConn);
 				break;
-			default:
-				payloadLength = buffer[1]&0x7F;
-		}
-		iPayloadData = iMaskingKey + 4;// 4 bytes = 32 bits
 
-		//unmasking the receive payload data [RFC 6455 5.3]
-		for (i=0; i < payloadLength; ++i)
-			buffer[iPayloadData+i] = buffer[iPayloadData+i] ^ buffer[iMaskingKey + i%4];
+			default:{
+				char const* reasonMsg = "received type of data cannot be accepted (only text data is accepted)";
+				//Close Frame (Data type not allowed)
+				sockConn->utowBuffer[0] = 0x88;//1000 1000 i.e FIN-bit 0 0 0 Opcode(4 bits)
 
-		buffer[iPayloadData + payloadLength] = 0;
+				//Payload len
+				*(uint16_t *)&sockConn->utowBuffer[2] = htons( 1003 );//Status Codes (see RFC 6455 7.4.1. "Defined Status Codes")
+				sockConn->utowBuffer[1] = (unsigned char)(strlen(reasonMsg) + 2);
 
-		//sending data to the web socket asynchronously
-		if (sockConn->fdu)
-			memcpy(sockConn->wtouBuffer, buffer + iPayloadData, payloadLength+1);
-		else
-			printf("[socket fd:%d]\tno user socket to send\n", sockConn->fdw);
-	}
+				sockConn->utowLen = 2 + sockConn->utowBuffer[1];
+
+				//sending the close frame
+				memcpy(sockConn->utowBuffer + 4, reasonMsg, sockConn->utowBuffer[1] - 1);
+				}
+				break;
+		}//switch
+	}//if at least one byte was received 
 }
 
 void onUSReceiveEventHandler(dual_sock_conn* sockConn){
@@ -378,7 +412,7 @@ void onWStoUSSendEventHandler(dual_sock_conn* sockConn){
 	if (sockConn->wtouBuffer[0]){
 		printf("[socket fd:%d]\tsend data to the user socket[%d]:\n%s\n", sockConn->fdw, sockConn->fdu, sockConn->wtouBuffer);
 		write(sockConn->fdu, sockConn->wtouBuffer, strlen(sockConn->wtouBuffer)+1);//send
-		sockConn->wtouBuffer[0] = 0;
+		*(int *)sockConn->wtouBuffer = 0;
 	}
 }
 
