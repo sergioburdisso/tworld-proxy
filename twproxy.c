@@ -16,7 +16,7 @@
 
 #define _PORT_					8000
 #define _MAX_CLIENT				32
-#define _BUFFER_SIZE			4*1024//4KB
+#define _BUFFER_SIZE			16*1024//16KB
 #define _QUEUE_LENGTH_			16
 #define _WS_SPECIFICATION_GUID	"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
@@ -27,32 +27,33 @@ typedef struct sockaddr_in sockaddr_in;
 // NOTE: fd stands for File Descriptor which is essentially an index for a kernel-resident array data structure
 // associated with this process used to keep track of all the buffer-based resources that the process is working with
 typedef struct _dual_sock_conn{
-	int		fdw;			// file descriptor assigned to the web socket
-	int		fdu;			// file descriptor assigned to the user socket
-	char*	wtouBuffer; 	// buffer used to send data from WebSocket to user socket
-	char*	utowBuffer;		// buffer used to send data from user socket to WebSocket
-	bool	newfdw_flag;	// flag used to indicate if the fdw correspond to a new webSocket (fdw)
+	int			fdw;			// file descriptor assigned to the web socket
+	int			fdu;			// file descriptor assigned to the user socket
+	bool		newfdw_flag;	// flag used to indicate if the fdw correspond to a new webSocket (fdw)
+	char*		wtouBuffer; 	// buffer used to send data from WebSocket to user socket
+	char*		utowBuffer;		// buffer used to send data from user socket to WebSocket
+	uint16_t	utowLen;		// number of bytes to be send from WebSocket to user socket
 } dual_sock_conn;
 
 //SELECT
-int fdMax;							// stores the biggest file descriptor assigned to this process so far
-int fdsReady;						// number of fds that have changed
-fd_set fdReadSocks, fdWriteSocks;	// set of fds we are going to wait for events to happen --write/read
+int		fdMax;						// stores the biggest file descriptor assigned to this process so far
+int		fdsReady;					// number of fds that have changed
+fd_set	fdReadSocks, fdWriteSocks;	// set of fds we are going to wait for events to happen --write/read
 
 //Server socket
-int fdServerSock;					// fd for the server socket (i.e the listen()-er socket)
-sockaddr_in serverAddress;			// address the listen()-er socket is going to be binded to
+int			fdServerSock;			// fd for the server socket (i.e the listen()-er socket)
+sockaddr_in	serverAddress;			// address the listen()-er socket is going to be binded to
 
 //Connections
 dual_sock_conn conns[_MAX_CLIENT];	// array of paired connections (webSocket, userSocket) needed for the 1 to 1 map
 
 //WebSocket handshake
+char secWebsocketAccept[29];		// Stores the Base64(SHA-1(fullWebSocketKey))
 regex_t regex_wsInitialMsg;			// compiled regular expression for detecting websocket handshake from web browser
-regmatch_t matchs[4];				// stores the substrings matching the subpatterns inside parenthesis
-char fullWebSocketKey[60];//[24+36+1]// Sec-WebSocket-Key base64-encoded value (when decoded, is 16 bytes in length)
-unsigned char* KeyHash;				// Stores the SHA1(fullWebSocketKey) 160 bits value for the server handshake replay
-char secWebsocketAccept[29];		// Stores the Base64(SHA1(fullWebSocketKey))
 char handshakeMessage[126];			// Stores the full handshake message to be sent to the WebSocket
+char fullWebSocketKey[60];			// Sec-WebSocket-Key base64-encoded value (when decoded, is 16 bytes in length)
+unsigned char* KeyHash;				// Stores the SHA1(fullWebSocketKey) 160 bits value for the server handshake replay
+regmatch_t matchs[4];				// stores the substrings matching the subpatterns inside parenthesis
 
 
 //"tells the Kernel that this process does not need to wait for (block until) this socket to complete reading/writing"
@@ -91,7 +92,7 @@ void resetAndSetFileDescriptorSets(){
 	FD_ZERO( &fdReadSocks  );
 	FD_ZERO( &fdWriteSocks );
 
-	//2) adding the fds of the sockets we want to be woken up by (whenever I/O events happen) to he fd sets
+	//2) adding the fds of the sockets we want to be woken up by (whenever I/O events happen) to the fd sets
 	//-> listener socket
 	FD_SET(fdServerSock, &fdReadSocks);
 
@@ -156,10 +157,10 @@ void newConnectionEventHandler(){
 }
 
 void onWSReceiveEventHandler(dual_sock_conn* sockConn){
-	int i, bytesRecv;
-	char buffer[_BUFFER_SIZE];
-	uint64_t payloadLength;
-	unsigned char iMaskingKey, iPayloadData;
+	char			buffer[_BUFFER_SIZE];
+	uint64_t		payloadLength;
+	unsigned int	i, bytesRecv;
+	unsigned char	iMaskingKey, iPayloadData;
 
 	printf("[socket fd:%d]\tWebSocket receives data\n", sockConn->fdw);
 
@@ -176,7 +177,7 @@ void onWSReceiveEventHandler(dual_sock_conn* sockConn){
 		close(sockConn->fdw);
 
 		if (sockConn->fdu){
-			char const* msg = "_ERROR: Tileworld instance was closed by other side";
+			char const* msg = "_ERROR_: Tileworld instance was closed by other side";
 			memcpy( sockConn->wtouBuffer, msg, strlen(msg)+1 );
 		}
 
@@ -198,8 +199,8 @@ void onWSReceiveEventHandler(dual_sock_conn* sockConn){
 		}
 
 		//WebSocket Message (see section 5 "Data Framing" from the RFC 6455) 
-		printf(
-			"\n\n------------------------\n|%d|%d|%d|%d|x%x\t|%d|x%x\t|\n",
+		/*printf(
+			"\n\nraw websocket message:\n------------------------\n|%d|%d|%d|%d|x%x\t|%d|x%x\t|\n",
 			(buffer[0]&0x80)? 1 : 0,	// FIN bit
 			(buffer[0]&0x40)? 1 : 0,	// RSV1 bit
 			(buffer[0]&0x20)? 1 : 0,	// RSV2 bit
@@ -208,7 +209,19 @@ void onWSReceiveEventHandler(dual_sock_conn* sockConn){
 
 			(buffer[1]&0x80)? 1 : 0,	// MASK bit
 			buffer[1]&0x7F				// Payload len (7 bits)
-		);
+		);*/
+
+		//opcode != 1
+		/*if (buffer[0]&0x80 != 1)
+			agregar al buffer y esperar hasta que sea 1
+		else
+			enviar el buffer*/
+
+		/*if (buffer[0]&0x01 != 1)
+			enviar(close frame con codigo 1003 7.4.1.  Defined Status Codes)*/
+
+		/*if (buffer[1]&0x80 == 0)// MASK bit) no se admiten mensajes sin mascara
+			enviar(close frame con codigo VER CODIGO 7.4.1.  Defined Status Codes)*/
 
 		iMaskingKey = 2;
 
@@ -232,9 +245,6 @@ void onWSReceiveEventHandler(dual_sock_conn* sockConn){
 
 		buffer[iPayloadData + payloadLength] = 0;
 
-		//printf("payload data: %s\n", buffer + 6);
-		printf("payloadLength= %d (%x);\n\n", payloadLength);
-
 		//sending data to the web socket asynchronously
 		if (sockConn->fdu)
 			memcpy(sockConn->wtouBuffer, buffer + iPayloadData, payloadLength+1);
@@ -244,8 +254,9 @@ void onWSReceiveEventHandler(dual_sock_conn* sockConn){
 }
 
 void onUSReceiveEventHandler(dual_sock_conn* sockConn){
-	int i, fdw_i= -1, bytesRecv;
-	char buffer[_BUFFER_SIZE];
+	int 			fdw_i= -1;
+	char 			buffer[_BUFFER_SIZE];
+	unsigned int	i, bytesRecv, iPayloadData;
 
 	printf("[socket fd:%d]\tuser socket receives data\n", sockConn->fdu);
 
@@ -261,8 +272,11 @@ void onUSReceiveEventHandler(dual_sock_conn* sockConn){
 
 		close(sockConn->fdu);
 		if (sockConn->fdw){
-			char const* msg = "_ERROR: Program Agent was closed by other side";
-			memcpy( sockConn->utowBuffer, msg, strlen(msg)+1 );
+			char const* msg = "_ERROR_: Program Agent was closed by other side";
+			sockConn->utowBuffer[0] = 0x81;//1000 0001 i.e FIN-bit 0 0 0 Opcode(4 bits)
+			sockConn->utowBuffer[1] = (unsigned char)strlen(msg);// Payload Len
+			sockConn->utowLen = 2 + sockConn->utowBuffer[1];
+			memcpy( sockConn->utowBuffer + 2, msg, sockConn->utowBuffer[1] + 1 );
 		}
 
 		sockConn->fdu = sockConn->wtouBuffer[0] = 0;
@@ -323,7 +337,8 @@ void onUSReceiveEventHandler(dual_sock_conn* sockConn){
 			strcat(handshakeMessage, secWebsocketAccept);
 			strcat(handshakeMessage, "\r\n\r\n");
 
-			memcpy( sockConn->utowBuffer, handshakeMessage, strlen(handshakeMessage)+1 );
+			sockConn->utowLen = strlen(handshakeMessage);
+			memcpy( sockConn->utowBuffer, handshakeMessage, sockConn->utowLen + 1 );
 		}else{
 			//if is not ws and user socket doesnt have a ws to exchange data with, try to find a free ws for it
 			if (!sockConn->fdw){
@@ -335,10 +350,24 @@ void onUSReceiveEventHandler(dual_sock_conn* sockConn){
 						break;
 					}
 			}
+			buffer[bytesRecv] = 0;
 
-			//sending data to the web socket asynchronously
+			sockConn->utowBuffer[0] = 0x81;//1000 0001 i.e FIN-bit 0 0 0 Opcode(4 bits)
+			iPayloadData = 2;
+
+			//[extended] Payload len
+			if (bytesRecv <= 125)
+				sockConn->utowBuffer[1] = (unsigned char)bytesRecv; // & 0x07F; //& 0111 1111 (MASK bit set to 0);
+			else{
+				sockConn->utowBuffer[1] = 126;
+				*(uint16_t *)&sockConn->utowBuffer[2] = htons( (uint16_t)bytesRecv );
+				iPayloadData+=2; //2 bytes = 16 bits
+			}
+
+			sockConn->utowLen = iPayloadData + bytesRecv;
+			//sending data to the websocket asynchronously encapsulated in a websocket frame
 			if (sockConn->fdw)
-				memcpy(sockConn->utowBuffer, buffer/*<- build ws protocol packet with this data in it*/, bytesRecv + 1);
+				memcpy(sockConn->utowBuffer + iPayloadData, buffer, bytesRecv + 1);
 			else
 				printf("[socket fd:%d]\tno webSocket to send\n", sockConn->fdu);
 		}
@@ -356,7 +385,7 @@ void onWStoUSSendEventHandler(dual_sock_conn* sockConn){
 void onUStoWSSendEventHandler(dual_sock_conn* sockConn){
 	if (sockConn->utowBuffer[0]){
 		printf("[socket fd:%d]\tsend data to the WebSocket[%d]:\n%s\n", sockConn->fdu, sockConn->fdw, sockConn->utowBuffer);
-		write(sockConn->fdw, sockConn->utowBuffer, strlen(sockConn->utowBuffer)+1);//send
+		write(sockConn->fdw, sockConn->utowBuffer, sockConn->utowLen);//send
 		sockConn->utowBuffer[0] = 0;
 	}
 }
