@@ -55,7 +55,7 @@ unsigned char* KeyHash;				// Stores the SHA1(fullWebSocketKey) 160 bits value f
 regmatch_t matchs[4];				// stores the substrings matching the subpatterns inside parenthesis
 
 //program options
-bool		_NO_FORWARDING = true;
+bool		_WS_TO_US_FORWARDING = true;
 bool		_VERBOSE_MODE = false;
 uint16_t	_PORT = 0;
 
@@ -191,7 +191,7 @@ void onWSReceiveEventHandler(dual_sock_conn* sockConn){
 	// if the other side closed the socket
 	if (bytesRecv == 0)
 		closeWS(sockConn);
-	else if (_NO_FORWARDING) {
+	else if (_WS_TO_US_FORWARDING) {
 		buffer[bytesRecv] = 0;
 
 		if (_VERBOSE_MODE) printf("[socket fd:%d]\tdata received is:\n%s\n", sockConn->fdw, buffer);
@@ -468,7 +468,7 @@ int main(int argc, char const* argv[]){
 			_VERBOSE_MODE = true;
 		else
 		if (!strcmp(argv[i], "--no-forwarding") || !strcmp(argv[i], "-n"))
-			_NO_FORWARDING = false;
+			_WS_TO_US_FORWARDING = false;
 		else
 		if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-?"))
 			displayHelp(argv[0]);
