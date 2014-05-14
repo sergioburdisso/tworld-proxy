@@ -14,17 +14,16 @@
 #include "lib/sha1.h"
 #include "lib/base64.h"
 
-#define _PORT_					8000
-#define _MAX_CLIENT				32
+#define _MAX_CLIENT				64
 #define _BUFFER_SIZE			16*1024//16KB
+#define _DEFAULT_PORT			80
 #define _QUEUE_LENGTH_			16
 #define _WS_SPECIFICATION_GUID	"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 typedef enum _bool {false=0, true=1} bool;
 typedef struct sockaddr_in sockaddr_in;
 
-// (1:1 mapping)
-// NOTE: fd stands for File Descriptor which is essentially an index for a kernel-resident array data structure
+// NOTE: fd stands for File Descriptor which is basically an index for a kernel-resident array data structure
 // associated with this process used to keep track of all the buffer-based resources that the process is working with
 typedef struct _dual_sock_conn{
 	int			fdw;			// file descriptor assigned to the web socket
@@ -35,7 +34,7 @@ typedef struct _dual_sock_conn{
 	uint16_t	utowLen;		// number of bytes to be send from WebSocket to user socket
 } dual_sock_conn;
 
-//SELECT
+//for select() system call
 int		fdMax;						// stores the biggest file descriptor assigned to this process so far
 int		fdsReady;					// number of fds that have changed
 fd_set	fdReadSocks, fdWriteSocks;	// set of fds we are going to wait for events to happen --write/read
@@ -54,6 +53,12 @@ char handshakeMessage[126];			// Stores the full handshake message to be sent to
 char fullWebSocketKey[60];			// Sec-WebSocket-Key base64-encoded value (when decoded, is 16 bytes in length)
 unsigned char* KeyHash;				// Stores the SHA1(fullWebSocketKey) 160 bits value for the server handshake replay
 regmatch_t matchs[4];				// stores the substrings matching the subpatterns inside parenthesis
+
+//program options
+bool		_NO_FORWARDING = true;
+bool		_VERBOSE_MODE = false;
+uint16_t	_PORT = 0;
+
 
 
 //"tells the Kernel that this process does not need to wait for (block until) this socket to complete reading/writing"
@@ -140,7 +145,7 @@ void newConnectionEventHandler(){
 				conns[i].utowBuffer = (char *)calloc(sizeof(char), _BUFFER_SIZE);
 			}
 
-			printf("[server socket]\tnew connection accepted [new socket fd:%d]\n", fdConnect); // TODO: --> luego agregar todos los mensajes /verbose o no
+			if (_VERBOSE_MODE) printf("[server socket]\tnew connection accepted [new socket fd:%d]\n", fdConnect);
 			break;
 		}
 	}
@@ -157,7 +162,7 @@ void newConnectionEventHandler(){
 }
 
 void closeWS(dual_sock_conn* sockConn){
-	printf("[socket fd:%d]\tother side closed the socket\n", sockConn->fdw);
+	if (_VERBOSE_MODE) printf("[socket fd:%d]\tother side closed the socket\n", sockConn->fdw);
 
 	close(sockConn->fdw);
 
@@ -175,7 +180,7 @@ void onWSReceiveEventHandler(dual_sock_conn* sockConn){
 	unsigned int	i, bytesRecv;
 	unsigned char	iMaskingKey, iPayloadData;
 
-	printf("[socket fd:%d]\tWebSocket receives data\n", sockConn->fdw);
+	if (_VERBOSE_MODE) printf("[socket fd:%d]\tWebSocket receives data\n", sockConn->fdw);
 
 	checkIfError(
 		bytesRecv = recv(sockConn->fdw, buffer, _BUFFER_SIZE, 0),
@@ -186,10 +191,10 @@ void onWSReceiveEventHandler(dual_sock_conn* sockConn){
 	// if the other side closed the socket
 	if (bytesRecv == 0)
 		closeWS(sockConn);
-	else{
+	else if (_NO_FORWARDING) {
 		buffer[bytesRecv] = 0;
 
-		printf("[socket fd:%d]\tdata received is:\n%s\n", sockConn->fdw, buffer);
+		if (_VERBOSE_MODE) printf("[socket fd:%d]\tdata received is:\n%s\n", sockConn->fdw, buffer);
 
 		//if ws socket doesnt have a user to exchange data with, try to find a free user for it
 		if (!sockConn->fdu){
@@ -261,7 +266,7 @@ void onWSReceiveEventHandler(dual_sock_conn* sockConn){
 							sockConn->wtouBuffer[offset + payloadLength+ 1] = 0;
 						}
 				}else
-					printf("[socket fd:%d]\tno user socket to send\n", sockConn->fdw);
+					if (_VERBOSE_MODE) printf("[socket fd:%d]\tno user socket to send to\n", sockConn->fdw);
 				break;
 
 			case 8: //Close frame
@@ -292,7 +297,7 @@ void onUSReceiveEventHandler(dual_sock_conn* sockConn){
 	char 			buffer[_BUFFER_SIZE];
 	unsigned int	i, bytesRecv, iPayloadData;
 
-	printf("[socket fd:%d]\tuser socket receives data\n", sockConn->fdu);
+	if (_VERBOSE_MODE) printf("[socket fd:%d]\tuser socket receives data\n", sockConn->fdu);
 
 	checkIfError(
 		bytesRecv = recv(sockConn->fdu, buffer, _BUFFER_SIZE, 0),
@@ -302,7 +307,7 @@ void onUSReceiveEventHandler(dual_sock_conn* sockConn){
 
 	// if the other side closed the socket
 	if (bytesRecv == 0){
-		printf("[socket fd:%d]\tother side closed the socket\n", sockConn->fdu);
+		if (_VERBOSE_MODE) printf("[socket fd:%d]\tother side closed the socket\n", sockConn->fdu);
 
 		close(sockConn->fdu);
 		if (sockConn->fdw){
@@ -317,11 +322,11 @@ void onUSReceiveEventHandler(dual_sock_conn* sockConn){
 	}else{
 		buffer[bytesRecv] = 0;
 
-		printf("[socket fd:%d]\tdata received is:\n%s\n", sockConn->fdu, buffer);
+		if (_VERBOSE_MODE) printf("[socket fd:%d]\tdata received is:\n%s\n", sockConn->fdu, buffer);
 
 		// if what we have received is a web socket message
 		if ( !regexec(&regex_wsInitialMsg, buffer, regex_wsInitialMsg.re_nsub+1, matchs, 0) ){
-			printf("[socket fd:%d]\tWebSocket detected\n", sockConn->fdu);
+			if (_VERBOSE_MODE) printf("[socket fd:%d]\tWebSocket detected\n", sockConn->fdu);
 
 			for (i=0; i < _MAX_CLIENT; ++i)
 				if ( (conns[i].fdu && !conns[i].fdw) && (conns[i].fdu != sockConn->fdu) ){ //a user waiting for a web socket!
@@ -330,7 +335,7 @@ void onUSReceiveEventHandler(dual_sock_conn* sockConn){
 					conns[i].fdw = sockConn->fdu;
 					sockConn->fdu = 0;
 					sockConn = &conns[i];
-					printf("[server socket]\tnew dual connection (ws %d, us %d)\n", sockConn->fdw, sockConn->fdu);
+					if (_VERBOSE_MODE) printf("[server socket]\tnew dual connection (ws %d, us %d)\n", sockConn->fdw, sockConn->fdu);
 					break;
 				}else
 				if (fdw_i == -1 && !conns[i].fdw)
@@ -342,7 +347,7 @@ void onUSReceiveEventHandler(dual_sock_conn* sockConn){
 				conns[fdw_i].fdw = sockConn->fdu;
 				sockConn->fdu = 0;
 				sockConn = &conns[fdw_i];
-				printf("[server socket]\tnew WebSocket %d waiting for incoming user sockets\n", sockConn->fdw);
+				if (_VERBOSE_MODE) printf("[server socket]\tnew WebSocket %d waiting for incoming user sockets\n", sockConn->fdw);
 			}
 
 			//WEBSOCKET OPENING HANDSHAKE [RFC 6455 4.2.1-2]
@@ -403,14 +408,14 @@ void onUSReceiveEventHandler(dual_sock_conn* sockConn){
 			if (sockConn->fdw)
 				memcpy(sockConn->utowBuffer + iPayloadData, buffer, bytesRecv + 1);
 			else
-				printf("[socket fd:%d]\tno webSocket to send\n", sockConn->fdu);
+				if (_VERBOSE_MODE) printf("[socket fd:%d]\tno webSocket to send to\n", sockConn->fdu);
 		}
 	}
 }
 
 void onWStoUSSendEventHandler(dual_sock_conn* sockConn){
 	if (sockConn->wtouBuffer[0]){
-		printf("[socket fd:%d]\tsend data to the user socket[%d]:\n%s\n", sockConn->fdw, sockConn->fdu, sockConn->wtouBuffer);
+		if (_VERBOSE_MODE) printf("[socket fd:%d]\tsend data to the user socket[%d]:\n%s\n", sockConn->fdw, sockConn->fdu, sockConn->wtouBuffer);
 		write(sockConn->fdu, sockConn->wtouBuffer, strlen(sockConn->wtouBuffer)+1);//send
 		*(int *)sockConn->wtouBuffer = 0;
 	}
@@ -418,15 +423,67 @@ void onWStoUSSendEventHandler(dual_sock_conn* sockConn){
 
 void onUStoWSSendEventHandler(dual_sock_conn* sockConn){
 	if (sockConn->utowBuffer[0]){
-		printf("[socket fd:%d]\tsend data to the WebSocket[%d]:\n%s\n", sockConn->fdu, sockConn->fdw, sockConn->utowBuffer);
+		if (_VERBOSE_MODE) printf("[socket fd:%d]\tsend data to the WebSocket[%d]:\n%s\n", sockConn->fdu, sockConn->fdw, sockConn->utowBuffer);
 		write(sockConn->fdw, sockConn->utowBuffer, sockConn->utowLen);//send
 		sockConn->utowBuffer[0] = 0;
 	}
 }
 
-int main(int argc, char const* argv[]){
-	printf("\nTileworld WebSocket proxy server running at port %d\nSergio Burdisso - 2014\n\n", _PORT_);
+void displayHelp(char const* programName){
+	printf(
+		"Usage: %s [OPTION]...\n\n"
+		"OPTIONS:\n\n"
+		"-p, --port <NUM>       Allow you to define the port number your Tileworld Proxy\n"
+		"                       will listen on.  The port  number must be  between 1 and\n"
+		"                       65535.  If no value is provided, this property is set to\n"
+		"                       the default value of %d\n\n"
+		"-v, --verbose          Allow the application to display trace information\n\n"
+		"-n, --no-forwarding    Disable forwarding data coming from  the 3D Tileworld to\n"
+		"                       the user program\n\n"
+		"-?, --help             Display this help and exit\n\n",
+		programName, _DEFAULT_PORT
+	);
+	exit(EXIT_SUCCESS);
+}
 
+int main(int argc, char const* argv[]){
+	int i;
+	//prints program header
+	printf(
+		"Tileworld Proxy (version 1.0)\n"
+		"Copyright (c) 2014 Sergio Burdisso\n\n"
+	);
+
+	//handles the input arguments
+	for (i=1; i < argc; ++i){
+		if (!strcmp(argv[i], "--port") || !strcmp(argv[i], "-p")){
+			//if port number is not valid (or empty)
+			if (i+1 >= argc || atoi(argv[i+1]) < 1){
+				perror("error: the port number must be between 1 and 65535\n");
+				exit(EXIT_FAILURE);
+			}
+			_PORT = atoi(argv[++i]);
+		}else
+		if (!strcmp(argv[i], "--verbose") || !strcmp(argv[i], "-v"))
+			_VERBOSE_MODE = true;
+		else
+		if (!strcmp(argv[i], "--no-forwarding") || !strcmp(argv[i], "-n"))
+			_NO_FORWARDING = false;
+		else
+		if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-?"))
+			displayHelp(argv[0]);
+		else{
+			printf("error: unrecognized option(s)\n\n", argv[i+1]);
+			displayHelp(argv[0]);
+		}
+	}
+
+	if (!_PORT){
+		printf("No port number was provided (using the default value %d)\n\n", _DEFAULT_PORT);
+		_PORT = _DEFAULT_PORT;
+	}
+
+	//compiles the regular expression used to parse the websocket opening handshake message
 	regcomp(
 		&regex_wsInitialMsg,
 		"GET[ \t].*"
@@ -435,6 +492,7 @@ int main(int argc, char const* argv[]){
 		REG_ICASE | REG_EXTENDED
 	);
 
+	//creates the server socket (i.e the listen()-er socket)
 	fdServerSock =socket(
 					AF_INET 	/*Internet domain sockets (IPv4)*/,
 					SOCK_STREAM	/*Byte-stream socket*/,
@@ -451,11 +509,11 @@ int main(int argc, char const* argv[]){
 	//filling up the serverAddress fields (i.e setting up our server address)
 	serverAddress.sin_family = AF_INET;
 	serverAddress.sin_addr.s_addr = htonl(INADDR_ANY);	//host byte order INADDR_ANY to equivalent network byte order long
-	serverAddress.sin_port = htons(_PORT_); 			//host byte order _PORT_ to equivalent network byte order short
+	serverAddress.sin_port = htons(_PORT); 			//host byte order _PORT to equivalent network byte order short
 
 
 	checkIfError(
-		//binding the our listener socket to the given address
+		//binding our listener socket to the given address
 		bind(fdServerSock, (const struct sockaddr*)&serverAddress, sizeof(serverAddress)),
 		"socket: bind",
 		"address already in use (try closing the process is already using this address)"
@@ -469,10 +527,12 @@ int main(int argc, char const* argv[]){
 		"couldn't prepare the server for incoming connections"
 	);
 
+	printf("Tileworld proxy running on port %d\n", _PORT);
+
 	fdMax = fdServerSock;
 
+	//server main loop
 	for(/*infinite*/;/*loop*/;/*it!*/){
-		int i;
 
 		//1) Initializes the file descriptor sets
 		resetAndSetFileDescriptorSets();
