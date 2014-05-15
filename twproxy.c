@@ -60,6 +60,31 @@ bool		_VERBOSE_MODE = false;
 uint16_t	_PORT = 0;
 
 
+void displayHelp(char const* programName){
+	printf(
+		"Usage: %s [OPTION]...\n\n"
+		"OPTIONS:\n\n"
+		"-p, --port <NUM>       Allow you to define the port number your Tileworld Proxy\n"
+		"                       will listen on.  The port  number must be  between 1 and\n"
+		"                       65535.  If no value is provided, this property is set to\n"
+		"                       the default value of %d\n\n"
+		"-v, --verbose          Allow the application to display trace information\n\n"
+		"-n, --no-forwarding    Disable forwarding data coming from  the 3D Tileworld to\n"
+		"                       the user program\n\n"
+		"-?, --help             Display this help and exit\n\n",
+		programName, _DEFAULT_PORT
+	);
+	exit(EXIT_SUCCESS);
+}
+
+//is it an error?
+void checkIfError(int value, char const* origin, char const* msg){
+	if (value < 0){
+		//fprintf (stderr, "%s: error:\n\t%s\n\n", origin, (msg!=NULL)? msg: "an unknown error has occurred");
+		printf("%s: error: %s.\n\n", origin, (msg!=NULL)? msg: "an unknown error has occurred");
+		exit(EXIT_FAILURE);
+	}
+}
 
 //"tells the Kernel that this process does not need to wait for (block until) this socket to complete reading/writing"
 void setNonBlockingFlag(int fdSock){
@@ -78,14 +103,6 @@ void setNonBlockingFlag(int fdSock){
 	flags = (flags | O_NONBLOCK);
 	if (fcntl(fdSock,F_SETFL,flags) < 0) {
 		perror("fcntl: error: cant set the socket flags (F_SETFL) in the kernel-resident file descriptors array related to this process");
-		exit(EXIT_FAILURE);
-	}
-}
-
-//is it an error?
-void checkIfError(int value, char const* origin, char const* msg){
-	if (value < 0){
-		fprintf (stderr, "%s: error:\n\t%s\n\n", origin, (msg!=NULL)? msg: "an unknown error has occurred");
 		exit(EXIT_FAILURE);
 	}
 }
@@ -118,6 +135,19 @@ void resetAndSetFileDescriptorSets(){
 			FD_SET(conns[i].fdu, &fdWriteSocks);
 		}
 	}
+}
+
+void closeWS(dual_sock_conn* sockConn){
+	if (_VERBOSE_MODE) printf("[socket fd:%d]\tother side closed the socket\n", sockConn->fdw);
+
+	close(sockConn->fdw);
+
+	if (sockConn->fdu){
+		char const* msg = "error('Tileworld instance was closed by other side').\n";
+		memcpy( sockConn->wtouBuffer, msg, strlen(msg) );
+	}
+
+	sockConn->fdw = sockConn->utowBuffer[0] = 0;
 }
 
 void newConnectionEventHandler(){
@@ -161,26 +191,13 @@ void newConnectionEventHandler(){
 		setNonBlockingFlag(fdConnect);
 }
 
-void closeWS(dual_sock_conn* sockConn){
-	if (_VERBOSE_MODE) printf("[socket fd:%d]\tother side closed the socket\n", sockConn->fdw);
-
-	close(sockConn->fdw);
-
-	if (sockConn->fdu){
-		char const* msg = "_ERROR_: Tileworld instance was closed by other side";
-		memcpy( sockConn->wtouBuffer, msg, strlen(msg)+1 );
-	}
-
-	sockConn->fdw = sockConn->utowBuffer[0] = 0;
-}
-
 void onWSReceiveEventHandler(dual_sock_conn* sockConn){
 	char			buffer[_BUFFER_SIZE];
 	uint64_t		payloadLength;
 	unsigned int	i, bytesRecv;
 	unsigned char	iMaskingKey, iPayloadData;
 
-	if (_VERBOSE_MODE) printf("[socket fd:%d]\tWebSocket receives data\n", sockConn->fdw);
+	if (_VERBOSE_MODE) printf("[socket fd:%d]\tdata from WebSocket was received\n", sockConn->fdw);
 
 	checkIfError(
 		bytesRecv = recv(sockConn->fdw, buffer, _BUFFER_SIZE, 0),
@@ -196,10 +213,13 @@ void onWSReceiveEventHandler(dual_sock_conn* sockConn){
 
 		if (_VERBOSE_MODE) printf("[socket fd:%d]\tdata received is:\n%s\n", sockConn->fdw, buffer);
 
-		//if ws socket doesnt have a user to exchange data with, try to find a free user for it
+		//if this websocket doesn't have a user to exchange data with, try to find a free user for it
 		if (!sockConn->fdu){
 			for (i=0; i < _MAX_CLIENT; ++i)
-				if ( !conns[i].fdw && conns[i].fdu ){ //if a user is waiting for a web socket!
+				//if a user is waiting for a web socket!
+				if ( !conns[i].fdw && conns[i].fdu ){
+					conns[i].newfdw_flag = true; //flag to know that this ws is new at this i-th position and its ready-to-read event was already served here
+
 					conns[i].fdw = sockConn->fdw;
 					sockConn->fdw = 0;
 					sockConn = &conns[i];
@@ -297,7 +317,7 @@ void onUSReceiveEventHandler(dual_sock_conn* sockConn){
 	char 			buffer[_BUFFER_SIZE];
 	unsigned int	i, bytesRecv, iPayloadData;
 
-	if (_VERBOSE_MODE) printf("[socket fd:%d]\tuser socket receives data\n", sockConn->fdu);
+	if (_VERBOSE_MODE) printf("[socket fd:%d]\tdata from the user socket was received\n", sockConn->fdu);
 
 	checkIfError(
 		bytesRecv = recv(sockConn->fdu, buffer, _BUFFER_SIZE, 0),
@@ -311,7 +331,7 @@ void onUSReceiveEventHandler(dual_sock_conn* sockConn){
 
 		close(sockConn->fdu);
 		if (sockConn->fdw){
-			char const* msg = "_ERROR_: Program Agent was closed by other side";
+			char const* msg = "error('Program Agent was closed by other side').\n";
 			sockConn->utowBuffer[0] = 0x81;//1000 0001 i.e FIN-bit 0 0 0 Opcode(4 bits)
 			sockConn->utowBuffer[1] = (unsigned char)strlen(msg);// Payload Len
 			sockConn->utowLen = 2 + sockConn->utowBuffer[1];
@@ -330,7 +350,7 @@ void onUSReceiveEventHandler(dual_sock_conn* sockConn){
 
 			for (i=0; i < _MAX_CLIENT; ++i)
 				if ( (conns[i].fdu && !conns[i].fdw) && (conns[i].fdu != sockConn->fdu) ){ //a user waiting for a web socket!
-					conns[i].newfdw_flag = true; //flag to know that this is a new ws and it's ready-to-read event was already served here
+					conns[i].newfdw_flag = true; //flag to know that this ws is new at this i-th position and its ready-to-read event was already served here
 
 					conns[i].fdw = sockConn->fdu;
 					sockConn->fdu = 0;
@@ -379,7 +399,7 @@ void onUSReceiveEventHandler(dual_sock_conn* sockConn){
 			sockConn->utowLen = strlen(handshakeMessage);
 			memcpy( sockConn->utowBuffer, handshakeMessage, sockConn->utowLen + 1 );
 		}else{
-			//if is not ws and user socket doesnt have a ws to exchange data with, try to find a free ws for it
+			//if it is a user socket and doesn't have a ws to exchange data with, try to find a free ws for it
 			if (!sockConn->fdw){
 				for (i=0; i < _MAX_CLIENT; ++i)
 					if ( !conns[i].fdu && conns[i].fdw ){ //a user waiting for a web socket!
@@ -416,7 +436,7 @@ void onUSReceiveEventHandler(dual_sock_conn* sockConn){
 void onWStoUSSendEventHandler(dual_sock_conn* sockConn){
 	if (sockConn->wtouBuffer[0]){
 		if (_VERBOSE_MODE) printf("[socket fd:%d]\tsend data to the user socket[%d]:\n%s\n", sockConn->fdw, sockConn->fdu, sockConn->wtouBuffer);
-		write(sockConn->fdu, sockConn->wtouBuffer, strlen(sockConn->wtouBuffer)+1);//send
+		write(sockConn->fdu, sockConn->wtouBuffer, strlen(sockConn->wtouBuffer));//send
 		*(int *)sockConn->wtouBuffer = 0;
 	}
 }
@@ -429,30 +449,11 @@ void onUStoWSSendEventHandler(dual_sock_conn* sockConn){
 	}
 }
 
-void displayHelp(char const* programName){
-	printf(
-		"Usage: %s [OPTION]...\n\n"
-		"OPTIONS:\n\n"
-		"-p, --port <NUM>       Allow you to define the port number your Tileworld Proxy\n"
-		"                       will listen on.  The port  number must be  between 1 and\n"
-		"                       65535.  If no value is provided, this property is set to\n"
-		"                       the default value of %d\n\n"
-		"-v, --verbose          Allow the application to display trace information\n\n"
-		"-n, --no-forwarding    Disable forwarding data coming from  the 3D Tileworld to\n"
-		"                       the user program\n\n"
-		"-?, --help             Display this help and exit\n\n",
-		programName, _DEFAULT_PORT
-	);
-	exit(EXIT_SUCCESS);
-}
-
 int main(int argc, char const* argv[]){
 	int i;
-	//prints program header
-	printf(
-		"Tileworld Proxy (version 1.0)\n"
-		"Copyright (c) 2014 Sergio Burdisso\n\n"
-	);
+
+	//redirectiong standard error (stderr) to standard output (stdout)
+	dup2(STDOUT_FILENO, STDERR_FILENO);
 
 	//handles the input arguments
 	for (i=1; i < argc; ++i){
@@ -473,10 +474,17 @@ int main(int argc, char const* argv[]){
 		if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-?"))
 			displayHelp(argv[0]);
 		else{
-			printf("error: unrecognized option(s)\n\n", argv[i+1]);
+			//fprintf(stderr, "%s: invalid option '%s'\n\n", argv[0], argv[i]);
+			printf("%s: invalid option '%s'\n\n", argv[0], argv[i]);
 			displayHelp(argv[0]);
 		}
 	}
+
+	//prints program header
+	printf(
+		"Tileworld Proxy (version 1.0)\n"
+		"Copyright (c) 2014 Sergio Burdisso\n\n"
+	);
 
 	if (!_PORT){
 		printf("No port number was provided (using the default value %d)\n\n", _DEFAULT_PORT);
@@ -499,7 +507,7 @@ int main(int argc, char const* argv[]){
 					IPPROTO_TCP	/*actual transport protocol to be used (TCP)*/
 				);
 
-	checkIfError(fdServerSock, "socket", "somehow the Operating System is denying the creation of sockets to this process");
+	checkIfError(fdServerSock, "socket", "somehow the Operating System is denying the creation of sockets for this process");
 	setNonBlockingFlag(fdServerSock);
 
 	//initializing variables to have 0 values (avoiding garbage values)
@@ -509,14 +517,25 @@ int main(int argc, char const* argv[]){
 	//filling up the serverAddress fields (i.e setting up our server address)
 	serverAddress.sin_family = AF_INET;
 	serverAddress.sin_addr.s_addr = htonl(INADDR_ANY);	//host byte order INADDR_ANY to equivalent network byte order long
-	serverAddress.sin_port = htons(_PORT); 			//host byte order _PORT to equivalent network byte order short
+	serverAddress.sin_port = htons(_PORT); 				//host byte order _PORT to equivalent network byte order short
 
 
 	checkIfError(
-		//binding our listener socket to the given address
+		//binding our listener socket to the given address:port
 		bind(fdServerSock, (const struct sockaddr*)&serverAddress, sizeof(serverAddress)),
 		"socket: bind",
-		"address already in use (try closing the process is already using this address)"
+		"(address, port) not allowed.\n"
+		"    try the following solutions in the order that they're listed:\n\n"
+		"        -Find and close the process that is already using this port numbr\n\n"
+		"        -Your Operating System  may be  reserving Port numbers  less than\n"
+		"         256 for well-known services (like HTTP on port 80) and port num-\n"
+		"         bers less  than 1024 require root  access on UNIX-based systems.\n"
+		"         Either try switching to root user or using a Port number greater\n"
+		"         then or equal to 1024\n\n"
+		"        -If you have  recently  closed  another instance  of this program,\n"
+		"         your Operating  System could've put  the socket  into a TIME_WAIT\n"
+		"         state before finally closing it,  so wait a few  minutes  and try\n"
+		"         again" 
 	);
 
 	checkIfError(
@@ -548,17 +567,16 @@ int main(int argc, char const* argv[]){
 		if (FD_ISSET(fdServerSock, &fdReadSocks))
 			newConnectionEventHandler();
 
-		//handling connections
+		//handling current connections
 		for (i=0; i < _MAX_CLIENT; ++i){
-			//ready for receiving event handler
+			//ready-for-receiving events handler
 			if ( !conns[i].newfdw_flag && FD_ISSET(conns[i].fdw, &fdReadSocks) )
 				onWSReceiveEventHandler(&conns[i]);
-
 
 			if ( FD_ISSET(conns[i].fdu, &fdReadSocks) )
 				onUSReceiveEventHandler(&conns[i]);
 
-			//ready for sending events
+			//ready-for-sending events handler
 			if ( FD_ISSET(conns[i].fdw, &fdWriteSocks) )
 				onUStoWSSendEventHandler(&conns[i]);
 
