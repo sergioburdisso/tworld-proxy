@@ -28,7 +28,8 @@ typedef struct sockaddr_in sockaddr_in;
 typedef struct _dual_sock_conn{
 	int			fdw;			// file descriptor assigned to the web socket
 	int			fdu;			// file descriptor assigned to the user socket
-	bool		newfdw_flag;	// flag used to indicate if the fdw correspond to a new webSocket (fdw)
+	bool		fdwHandled_flag;// flag used to indicate if the fdw is new at this node (and its events were previously handled)
+	bool		fduHandled_flag;// flag used to indicate if the fds is new at this node (and its events were previously handled)
 	char*		wtouBuffer; 	// buffer used to send data from WebSocket to user socket
 	char*		utowBuffer;		// buffer used to send data from user socket to WebSocket
 	uint16_t	utowLen;		// number of bytes to be send from WebSocket to user socket
@@ -124,7 +125,7 @@ void resetAndSetFileDescriptorSets(){
 	//through them
 	for (i=0; i < _MAX_CLIENT; ++i){
 		if ( conns[i].fdw ){
-			conns[i].newfdw_flag = false;
+			conns[i].fduHandled_flag = conns[i].fdwHandled_flag = false;
 
 			FD_SET(conns[i].fdw, &fdReadSocks );
 			FD_SET(conns[i].fdw, &fdWriteSocks);
@@ -143,7 +144,7 @@ void closeWS(dual_sock_conn* sockConn){
 	close(sockConn->fdw);
 
 	if (sockConn->fdu){
-		char const* msg = "error('Tileworld instance was closed by other side').\n";
+		char const* msg = "error('Tileworld instance was closed by the other side').\n";
 		memcpy( sockConn->wtouBuffer, msg, strlen(msg) );
 	}
 
@@ -197,7 +198,7 @@ void onWSReceiveEventHandler(dual_sock_conn* sockConn){
 	unsigned int	i, bytesRecv;
 	unsigned char	iMaskingKey, iPayloadData;
 
-	if (_VERBOSE_MODE) printf("[socket fd:%d]\tdata from WebSocket was received\n", sockConn->fdw);
+	if (_VERBOSE_MODE) printf("[socket fd:%d]\tnew data from this WebSocket was received\n", sockConn->fdw);
 
 	checkIfError(
 		bytesRecv = recv(sockConn->fdw, buffer, _BUFFER_SIZE, 0),
@@ -211,14 +212,14 @@ void onWSReceiveEventHandler(dual_sock_conn* sockConn){
 	else if (_WS_TO_US_FORWARDING) {
 		buffer[bytesRecv] = 0;
 
-		if (_VERBOSE_MODE) printf("[socket fd:%d]\tdata received is:\n%s\n", sockConn->fdw, buffer);
+		if (_VERBOSE_MODE) printf("[socket fd:%d]\tdata is:\n%s\n", sockConn->fdw, buffer);
 
 		//if this websocket doesn't have a user to exchange data with, try to find a free user for it
 		if (!sockConn->fdu){
 			for (i=0; i < _MAX_CLIENT; ++i)
 				//if a user is waiting for a web socket!
 				if ( !conns[i].fdw && conns[i].fdu ){
-					conns[i].newfdw_flag = true; //flag to know that this ws is new at this i-th position and its ready-to-read event was already served here
+					conns[i].fdwHandled_flag = true; //flag to know that this ws is new at this i-th position and its ready-to-read event is already handled
 
 					conns[i].fdw = sockConn->fdw;
 					sockConn->fdw = 0;
@@ -286,7 +287,7 @@ void onWSReceiveEventHandler(dual_sock_conn* sockConn){
 							sockConn->wtouBuffer[offset + payloadLength+ 1] = 0;
 						}
 				}else
-					if (_VERBOSE_MODE) printf("[socket fd:%d]\tno user socket to send to\n", sockConn->fdw);
+					if (_VERBOSE_MODE) printf("[socket fd:%d]\tno user socket to send data to\n", sockConn->fdw);
 				break;
 
 			case 8: //Close frame
@@ -317,7 +318,7 @@ void onUSReceiveEventHandler(dual_sock_conn* sockConn){
 	char 			buffer[_BUFFER_SIZE];
 	unsigned int	i, bytesRecv, iPayloadData;
 
-	if (_VERBOSE_MODE) printf("[socket fd:%d]\tdata from the user socket was received\n", sockConn->fdu);
+	if (_VERBOSE_MODE) printf("[socket fd:%d]\tnew data from this user socket was received\n", sockConn->fdu);
 
 	checkIfError(
 		bytesRecv = recv(sockConn->fdu, buffer, _BUFFER_SIZE, 0),
@@ -331,7 +332,7 @@ void onUSReceiveEventHandler(dual_sock_conn* sockConn){
 
 		close(sockConn->fdu);
 		if (sockConn->fdw){
-			char const* msg = "error('Program Agent was closed by other side').\n";
+			char const* msg = "error('Program Agent was closed by the other side')";
 			sockConn->utowBuffer[0] = 0x81;//1000 0001 i.e FIN-bit 0 0 0 Opcode(4 bits)
 			sockConn->utowBuffer[1] = (unsigned char)strlen(msg);// Payload Len
 			sockConn->utowLen = 2 + sockConn->utowBuffer[1];
@@ -342,7 +343,7 @@ void onUSReceiveEventHandler(dual_sock_conn* sockConn){
 	}else{
 		buffer[bytesRecv] = 0;
 
-		if (_VERBOSE_MODE) printf("[socket fd:%d]\tdata received is:\n%s\n", sockConn->fdu, buffer);
+		if (_VERBOSE_MODE) printf("[socket fd:%d]\tdata is:\n%s\n", sockConn->fdu, buffer);
 
 		// if what we have received is a web socket message
 		if ( !regexec(&regex_wsInitialMsg, buffer, regex_wsInitialMsg.re_nsub+1, matchs, 0) ){
@@ -350,19 +351,19 @@ void onUSReceiveEventHandler(dual_sock_conn* sockConn){
 
 			for (i=0; i < _MAX_CLIENT; ++i)
 				if ( (conns[i].fdu && !conns[i].fdw) && (conns[i].fdu != sockConn->fdu) ){ //a user waiting for a web socket!
-					conns[i].newfdw_flag = true; //flag to know that this ws is new at this i-th position and its ready-to-read event was already served here
+					conns[i].fdwHandled_flag = true; //flag to know that this ws is new at this i-th position and its ready-to-read event is already handled
 
 					conns[i].fdw = sockConn->fdu;
 					sockConn->fdu = 0;
 					sockConn = &conns[i];
-					if (_VERBOSE_MODE) printf("[server socket]\tnew dual connection (ws %d, us %d)\n", sockConn->fdw, sockConn->fdu);
+					if (_VERBOSE_MODE) printf("[server socket]\tnew dual connection created (ws %d, us %d)\n", sockConn->fdw, sockConn->fdu);
 					break;
 				}else
 				if (fdw_i == -1 && !conns[i].fdw)
 					fdw_i = i;
 
 			if (i >= _MAX_CLIENT){//wasn't able to found a free user
-				conns[fdw_i].newfdw_flag = true; //flag to know that this is a new ws and it's ready-to-read event was already served here
+				conns[fdw_i].fdwHandled_flag = true; //flag to know that this ws is new at this i-th position and its ready-to-read event is already handled
 
 				conns[fdw_i].fdw = sockConn->fdu;
 				sockConn->fdu = 0;
@@ -402,7 +403,10 @@ void onUSReceiveEventHandler(dual_sock_conn* sockConn){
 			//if it is a user socket and doesn't have a ws to exchange data with, try to find a free ws for it
 			if (!sockConn->fdw){
 				for (i=0; i < _MAX_CLIENT; ++i)
-					if ( !conns[i].fdu && conns[i].fdw ){ //a user waiting for a web socket!
+					//if a user socket is waiting for a web socket!
+					if ( !conns[i].fdu && conns[i].fdw ){
+						conns[i].fduHandled_flag = true;//flag to know that this us is new at this i-th position and its ready-to-read event is already handled
+
 						conns[i].fdu = sockConn->fdu;
 						sockConn->fdu = 0;
 						sockConn = &conns[i];
@@ -428,14 +432,14 @@ void onUSReceiveEventHandler(dual_sock_conn* sockConn){
 			if (sockConn->fdw)
 				memcpy(sockConn->utowBuffer + iPayloadData, buffer, bytesRecv + 1);
 			else
-				if (_VERBOSE_MODE) printf("[socket fd:%d]\tno webSocket to send to\n", sockConn->fdu);
+				if (_VERBOSE_MODE) printf("[socket fd:%d]\tno webSocket to send data to\n", sockConn->fdu);
 		}
 	}
 }
 
 void onWStoUSSendEventHandler(dual_sock_conn* sockConn){
 	if (sockConn->wtouBuffer[0]){
-		if (_VERBOSE_MODE) printf("[socket fd:%d]\tsend data to the user socket[%d]:\n%s\n", sockConn->fdw, sockConn->fdu, sockConn->wtouBuffer);
+		if (_VERBOSE_MODE) printf("[socket fd:%d]\tsends data to the user socket[%d]:\n%s\n", sockConn->fdw, sockConn->fdu, sockConn->wtouBuffer);
 		write(sockConn->fdu, sockConn->wtouBuffer, strlen(sockConn->wtouBuffer));//send
 		*(int *)sockConn->wtouBuffer = 0;
 	}
@@ -443,7 +447,7 @@ void onWStoUSSendEventHandler(dual_sock_conn* sockConn){
 
 void onUStoWSSendEventHandler(dual_sock_conn* sockConn){
 	if (sockConn->utowBuffer[0]){
-		if (_VERBOSE_MODE) printf("[socket fd:%d]\tsend data to the WebSocket[%d]:\n%s\n", sockConn->fdu, sockConn->fdw, sockConn->utowBuffer);
+		if (_VERBOSE_MODE) printf("[socket fd:%d]\tsends data to the WebSocket[%d]:\n%s\n", sockConn->fdu, sockConn->fdw, sockConn->utowBuffer);
 		write(sockConn->fdw, sockConn->utowBuffer, sockConn->utowLen);//send
 		sockConn->utowBuffer[0] = 0;
 	}
@@ -570,10 +574,10 @@ int main(int argc, char const* argv[]){
 		//handling current connections
 		for (i=0; i < _MAX_CLIENT; ++i){
 			//ready-for-receiving events handler
-			if ( !conns[i].newfdw_flag && FD_ISSET(conns[i].fdw, &fdReadSocks) )
+			if ( !conns[i].fdwHandled_flag && FD_ISSET(conns[i].fdw, &fdReadSocks) )
 				onWSReceiveEventHandler(&conns[i]);
 
-			if ( FD_ISSET(conns[i].fdu, &fdReadSocks) )
+			if ( !conns[i].fduHandled_flag && FD_ISSET(conns[i].fdu, &fdReadSocks) )
 				onUSReceiveEventHandler(&conns[i]);
 
 			//ready-for-sending events handler
