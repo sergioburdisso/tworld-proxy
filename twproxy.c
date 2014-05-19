@@ -49,22 +49,25 @@ Copyright (C) 2014 Burdisso Sergio. All rights reserved.
 #define _DEFAULT_PORT			80
 #define _QUEUE_LENGTH_			16
 #define _FD_HANDLED_FLAG		0x8000
+#define _XML_XSD_LOCATION		"./resrc/tw_msg.xsd"
 #define _WS_SPECIFICATION_GUID	"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
 //
 // DATA TYPES DEFINITIONS
 //
-typedef enum _bool {false=0, true=1} bool;
 typedef struct sockaddr_in sockaddr_in;
+typedef enum _bool {false=0, true=1} bool;
+typedef enum _format {JSON='{', XML='<', PROLOG='\0'} data_format;
 
 //struct used to keep track of each (1:1) connection
 typedef struct _dual_sock_conn{
-	uint16_t	fdw;			// file descriptor assigned to the web socket  (HANDLED bit + FD (15 bits))
+	uint16_t	fdw;			// file descriptor assigned to the web socket (HANDLED bit + FD (15 bits))
 	uint16_t	fdr;			// file descriptor assigned to the raw socket (HANDLED bit + FD (15 bits))
-	char*		wtorBuffer; 	// buffer used to send data from the WebSocket to the raw socket
+	char*		wtorBuffer;		// buffer used to send data from the WebSocket to the raw socket
 	char*		rtowBuffer;		// buffer used to send data from the raw socket to the WebSocket
 	uint16_t	rtowLen;		// number of bytes to be send from WebSocket to raw socket
+	data_format	wtorFormat;		// format of data sent to the raw socket (JSON, XML, PROLOG)
 } dual_sock_conn;
 
 
@@ -83,15 +86,15 @@ sockaddr_in	serverAddress;			// address the listen()-er socket is going to be bi
 //Connections
 dual_sock_conn conns[_MAX_CLIENT];	// array of paired connections (webSocket, userSocket) needed for the 1 to 1 map
 
-//WebSocket handshake
-regmatch_t matchs[4];				// stores the substrings matching the subpatterns inside parenthesis
+//WebSocket protocol handshake [RFC 6455]
+regmatch_t matchs[4];				// stores the substrings matching the subpatterns (within regex_wsInitialMsg)
 unsigned char* KeyHash;				// Stores the SHA1(fullWebSocketKey) 160 bits value for the server handshake replay
 char fullWebSocketKey[60];			// Sec-WebSocket-Key base64-encoded value (when decoded, is 16 bytes in length)
 char handshakeMessage[126];			// Stores the full handshake message to be sent to the WebSocket
 char secWebsocketAccept[29];		// Stores the Base64(SHA-1(fullWebSocketKey))
 regex_t regex_wsInitialMsg;			// compiled regular expression for detecting websocket handshake from web browser
 
-//program options
+//program input options
 uint16_t	_PORT = 0;
 bool		_VERBOSE_MODE = false;
 bool		_WS_TO_RS_FORWARDING = true;
@@ -100,17 +103,17 @@ bool		_WS_TO_RS_FORWARDING = true;
 //
 // FUNCTION DECLARATIONS (PROTOTYPES)
 //
-void resetAndSetFileDescriptorSets	(void);
-void newConnectionEventHandler		(void);
-void onWStoRSSendEventHandler		(dual_sock_conn*);
-void onRStoWSSendEventHandler		(dual_sock_conn*);
-void onWSReceiveEventHandler		(dual_sock_conn*);
-void onUSReceiveEventHandler		(dual_sock_conn*);
-void setNonBlockingFlag				(int);
-void exit_twproxy					(int);
-void checkIfError					(int, char const*, char const*);
-void displayHelp					(char const*);
-void closeWS						(dual_sock_conn*);
+void resetAndSetFileDescriptorSets	(void);							// Initializes the file descriptor sets (used for select()-ing the sockets we take care of)
+void newConnectionEventHandler		(void);							// handles new connection
+void onWStoRSSendEventHandler		(dual_sock_conn*);				// ready-to-send (to raw socket) event handler
+void onRStoWSSendEventHandler		(dual_sock_conn*);				// ready-to-send (to WebSocket) event handler
+void onWSReceiveEventHandler		(dual_sock_conn*);				// ready-to-receive (from WebSocket) event handler
+void onRSReceiveEventHandler		(dual_sock_conn*);				// ready-to-receive (from raw socket) event handler
+void setNonBlockingFlag				(int);							// tells the kernel the socket linked to a fd is nonblocking
+void exit_twproxy					(int);							// proxy terminates its execution
+void checkIfError					(int, char const*, char const*);// checks if first argument is a negative number, prints an error and terminates execution
+void displayHelp					(char const*);					// prints the help dialog
+void closeWS						(dual_sock_conn*);				// sends a close frame to a certain WebSocket
 
 
 //
@@ -239,14 +242,14 @@ int main (int argc, char const* argv[]) {
 			//Note: the first bit of conns[i].fdw/u is a flag used to indicate whether
 			//      the fdw/u is new at conns[i] (and its events were previously handled)
 
-			//-> ready-for-receiving events handler
+			//-> ready-to-receive events handler
 			if ( !(conns[i].fdw&_FD_HANDLED_FLAG) && FD_ISSET(conns[i].fdw, &fdReadSocks) )
 				onWSReceiveEventHandler(&conns[i]);
 
 			if ( !(conns[i].fdr&_FD_HANDLED_FLAG) && FD_ISSET(conns[i].fdr, &fdReadSocks) )
-				onUSReceiveEventHandler(&conns[i]);
+				onRSReceiveEventHandler(&conns[i]);
 
-			//-> ready-for-sending events handler
+			//-> ready-to-send events handler
 			if ( FD_ISSET(conns[i].fdw&_FD_MASK, &fdWriteSocks) )
 				onRStoWSSendEventHandler(&conns[i]);
 
@@ -260,6 +263,7 @@ int main (int argc, char const* argv[]) {
 	return 0;
 }//main
 
+// Tileworld proxy terminates its execution
 void exit_twproxy (int status) {
 	close(fdServerSock);
 	regfree(&regex_wsInitialMsg);
@@ -267,6 +271,7 @@ void exit_twproxy (int status) {
 	exit(status);
 }
 
+// prints the help dialog
 void displayHelp (char const* programName) {
 	printf(
 		"Usage: %s [OPTION]...\n\n"
@@ -284,16 +289,16 @@ void displayHelp (char const* programName) {
 	exit(EXIT_SUCCESS);
 }
 
-//is it an error?
+// checks if first argument is a negative number, prints an error and terminates execution
 void checkIfError (int value, char const* origin, char const* msg) {
 	if (value < 0){
-		//fprintf (stderr, "%s: error:\n\t%s\n\n", origin, (msg!=NULL)? msg: "an unknown error has occurred");
+		//fprintf (stderr, "%s: error:\n\t%s\n\n", origin, (msg!=NULL)? msg: "an unknown error has occurred"); <- not working on my Android device :(
 		printf("%s: error: %s.\n\n", origin, (msg!=NULL)? msg: "an unknown error has occurred");
 		exit_twproxy(EXIT_FAILURE);
 	}
 }
 
-//"tells the Kernel that this process does not need to wait for (block until) this socket to complete reading/writing"
+// "tells the Kernel that this process does not need to wait for (block until) this socket to complete reading/writing"
 void setNonBlockingFlag (int fdSock) {
 	int flags;
 
@@ -314,6 +319,7 @@ void setNonBlockingFlag (int fdSock) {
 	}
 }
 
+// Initializes the file descriptor sets (used for select()-ing the sockets we take care of)
 void resetAndSetFileDescriptorSets () {
 	int i;
 
@@ -345,19 +351,39 @@ void resetAndSetFileDescriptorSets () {
 	}
 }
 
+// sends a close frame to a certain WebSocket
 void closeWS (dual_sock_conn* sockConn) {
 	if (_VERBOSE_MODE) printf("[socket fd:%d]\tother side closed the socket\n", sockConn->fdw);
 
 	close(sockConn->fdw);
 
 	if (sockConn->fdr){
-		char const* msg = "error('Tileworld instance was closed by the other side').\n";
+		char const* msg;
+
+		switch(sockConn->wtorFormat){
+			case JSON:
+				msg = "{\"header\":\"error\",\"data\":\"Tileworld instance was closed by the other side\"}";
+				break;
+			case XML:
+				msg =	"<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+						"<tw_msg "
+						"xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" "
+						"xsi:noNamespaceSchemaLocation=\""_XML_XSD_LOCATION"\">"
+						"<header>error</header>"
+						"<data>Tileworld instance was closed by the other side</data>"
+						"</tw_msg>";
+				break;
+			default://PROLOG
+				msg = "tw_msg(header(error), data('3D Tileworld instance was closed by the other side')).\n";
+		}
+
 		memcpy( sockConn->wtorBuffer, msg, strlen(msg) + 1 );
 	}
 
 	sockConn->fdw = sockConn->rtowBuffer[0] = 0;
 }
 
+// handles new connection
 void newConnectionEventHandler () {
 	int i, fdConnect;
 
@@ -399,6 +425,7 @@ void newConnectionEventHandler () {
 		setNonBlockingFlag(fdConnect);
 }
 
+// ready-to-receive (from WebSocket) event handler
 void onWSReceiveEventHandler (dual_sock_conn* sockConn) {
 	char			buffer[_BUFFER_SIZE];
 	uint64_t		payloadLength;
@@ -520,7 +547,8 @@ void onWSReceiveEventHandler (dual_sock_conn* sockConn) {
 	}//if at least one byte was received 
 }
 
-void onUSReceiveEventHandler (dual_sock_conn* sockConn) {
+// ready-to-receive (from raw socket) event handler
+void onRSReceiveEventHandler (dual_sock_conn* sockConn) {
 	int 			fdw_i= -1;
 	char 			buffer[_BUFFER_SIZE];
 	unsigned int	i, bytesRecv, iPayloadData;
@@ -646,14 +674,19 @@ void onUSReceiveEventHandler (dual_sock_conn* sockConn) {
 	}
 }
 
+// ready-to-send (to raw socket) event handler
 void onWStoRSSendEventHandler (dual_sock_conn* sockConn) {
 	if (sockConn->wtorBuffer[0]){
 		if (_VERBOSE_MODE) printf("[socket fd:%d]\tsends data to the raw socket[%d]:\n%s\n", sockConn->fdw, sockConn->fdr&_FD_MASK, sockConn->wtorBuffer);
+
+		sockConn->wtorFormat = sockConn->wtorBuffer[0];
+
 		write(sockConn->fdr&_FD_MASK, sockConn->wtorBuffer, strlen(sockConn->wtorBuffer));//send
 		*(int *)sockConn->wtorBuffer = 0;
 	}
 }
 
+// ready-to-send (to WebSocket) event handler
 void onRStoWSSendEventHandler (dual_sock_conn* sockConn) {
 	if (sockConn->rtowBuffer[0]){
 		if (_VERBOSE_MODE) printf("[socket fd:%d]\tsends data to the WebSocket[%d]:\n%s\n", sockConn->fdr, sockConn->fdw&_FD_MASK, sockConn->rtowBuffer);
@@ -661,3 +694,5 @@ void onRStoWSSendEventHandler (dual_sock_conn* sockConn) {
 		sockConn->rtowBuffer[0] = 0;
 	}
 }
+
+//that's it! =D
