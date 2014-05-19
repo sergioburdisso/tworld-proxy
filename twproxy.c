@@ -242,14 +242,14 @@ int main (int argc, char const* argv[]) {
 			//Note: the first bit of conns[i].fdw/u is a flag used to indicate whether
 			//      the fdw/u is new at conns[i] (and its events were previously handled)
 
-			//-> ready-to-receive events handler
+			//-> ready-to-receive event handlers
 			if ( !(conns[i].fdw&_FD_HANDLED_FLAG) && FD_ISSET(conns[i].fdw, &fdReadSocks) )
 				onWSReceiveEventHandler(&conns[i]);
 
 			if ( !(conns[i].fdr&_FD_HANDLED_FLAG) && FD_ISSET(conns[i].fdr, &fdReadSocks) )
 				onRSReceiveEventHandler(&conns[i]);
 
-			//-> ready-to-send events handler
+			//-> ready-to-send event handlers
 			if ( FD_ISSET(conns[i].fdw&_FD_MASK, &fdWriteSocks) )
 				onRStoWSSendEventHandler(&conns[i]);
 
@@ -370,7 +370,7 @@ void closeWS (dual_sock_conn* sockConn) {
 						"xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" "
 						"xsi:noNamespaceSchemaLocation=\""_XML_XSD_LOCATION"\">"
 						"<header>error</header>"
-						"<data>Tileworld instance was closed by the other side</data>"
+						"<desc>Tileworld instance was closed by the other side</desc>"
 						"</tw_msg>";
 				break;
 			default://PROLOG
