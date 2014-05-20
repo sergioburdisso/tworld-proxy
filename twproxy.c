@@ -7,7 +7,7 @@ associated with this process used to keep track of all the buffer-based resource
 
 Copyright (C) 2014 Burdisso Sergio. All rights reserved.
 
- //Original sources are available at https://code.google.com/p/x2js/
+ //Original sources are available at https://
 
  Licensed under the Apache License, Version 2.0 (the "License");
  you may not use this file except in compliance with the License.
@@ -50,6 +50,7 @@ Copyright (C) 2014 Burdisso Sergio. All rights reserved.
 #define _QUEUE_LENGTH_			16
 #define _FD_HANDLED_FLAG		0x8000
 #define _XML_XSD_LOCATION		"./resrc/tw_msg.xsd"
+#define _WS_CLOSED_MESSAGE		"Tileworld instance was closed by the other side"
 #define _WS_SPECIFICATION_GUID	"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
@@ -58,7 +59,7 @@ Copyright (C) 2014 Burdisso Sergio. All rights reserved.
 //
 typedef struct sockaddr_in sockaddr_in;
 typedef enum _bool {false=0, true=1} bool;
-typedef enum _format {JSON='{', XML='<', PROLOG='\0'} data_format;
+typedef enum _format {JSON='{', XML='<', PROLOG=' ', UNKNOWN='\0'} data_format;
 
 //struct used to keep track of each (1:1) connection
 typedef struct _dual_sock_conn{
@@ -351,38 +352,6 @@ void resetAndSetFileDescriptorSets () {
 	}
 }
 
-// sends a close frame to a certain WebSocket
-void closeWS (dual_sock_conn* sockConn) {
-	if (_VERBOSE_MODE) printf("[socket fd:%d]\tother side closed the socket\n", sockConn->fdw);
-
-	close(sockConn->fdw);
-
-	if (sockConn->fdr){
-		char const* msg;
-
-		switch(sockConn->wtorFormat){
-			case JSON:
-				msg = "{\"header\":\"error\",\"data\":\"Tileworld instance was closed by the other side\"}";
-				break;
-			case XML:
-				msg =	"<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
-						"<tw_msg "
-						"xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" "
-						"xsi:noNamespaceSchemaLocation=\""_XML_XSD_LOCATION"\">"
-						"<header>error</header>"
-						"<desc>Tileworld instance was closed by the other side</desc>"
-						"</tw_msg>";
-				break;
-			default://PROLOG
-				msg = "tw_msg(header(error), data('3D Tileworld instance was closed by the other side')).\n";
-		}
-
-		memcpy( sockConn->wtorBuffer, msg, strlen(msg) + 1 );
-	}
-
-	sockConn->fdw = sockConn->rtowBuffer[0] = 0;
-}
-
 // handles new connection
 void newConnectionEventHandler () {
 	int i, fdConnect;
@@ -425,6 +394,57 @@ void newConnectionEventHandler () {
 		setNonBlockingFlag(fdConnect);
 }
 
+// sends a close frame to a certain WebSocket
+void closeWS (dual_sock_conn* sockConn) {
+	if (_VERBOSE_MODE) printf("[socket fd:%d]\tother side closed the socket\n", sockConn->fdw);
+
+	close(sockConn->fdw);
+
+	//if this websocket doesn't have a user to send the close message
+	if (!sockConn->fdr){
+		int i;
+		//try to find a free user for it
+		for (i=0; i < _MAX_CLIENT; ++i)
+			if ( !conns[i].fdw && conns[i].fdr ){
+				sockConn->fdw = sockConn->rtowBuffer[0] = 0;
+				sockConn = &conns[i];
+				break;
+			}
+	}else
+		sockConn->fdw = sockConn->rtowBuffer[0] = 0;
+
+	if (sockConn->fdr){
+		char const* msg;
+
+		switch(sockConn->wtorFormat){
+
+			case JSON:
+				msg =	"{\"header\":\"error\",\"data\":\""_WS_CLOSED_MESSAGE"\"}";
+				break;
+			
+			case XML:
+				msg =	"<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+						"<tw_msg "
+						"xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" "
+						"xsi:noNamespaceSchemaLocation=\""_XML_XSD_LOCATION"\">"
+						"<header>error</header>"
+						"<desc>"_WS_CLOSED_MESSAGE"</desc>"
+						"</tw_msg>";
+				break;
+			
+			case UNKNOWN:
+				msg =	"error: "_WS_CLOSED_MESSAGE;
+				break;
+
+			//case PROLOG:
+			default:
+				msg =	"tw_msg(header(error), data('"_WS_CLOSED_MESSAGE"')).\n";
+		}
+
+		memcpy( sockConn->wtorBuffer, msg, strlen(msg) + 1 );
+	}
+}
+
 // ready-to-receive (from WebSocket) event handler
 void onWSReceiveEventHandler (dual_sock_conn* sockConn) {
 	char			buffer[_BUFFER_SIZE];
@@ -432,7 +452,7 @@ void onWSReceiveEventHandler (dual_sock_conn* sockConn) {
 	unsigned int	i, bytesRecv;
 	unsigned char	iMaskingKey, iPayloadData;
 
-	if (_VERBOSE_MODE) printf("[socket fd:%d]\tnew data from this WebSocket was received\n", sockConn->fdw);
+	if (_VERBOSE_MODE) printf("[socket fd:%d]\tnew data from the WebSocket was received\n", sockConn->fdw);
 
 	checkIfError(
 		bytesRecv = recv(sockConn->fdw, buffer, _BUFFER_SIZE, 0),
@@ -461,11 +481,10 @@ void onWSReceiveEventHandler (dual_sock_conn* sockConn) {
 					break;
 				}
 		}
-		
-		//WEBSOCKET MESSAGE (see section 5 "Data Framing" from the RFC 6455) 
-		
-		//lookup the OpCode
-		switch ( buffer[0]&0x0F ){
+
+		/** WEBSOCKET MESSAGE (see section 5 "Data Framing" from the RFC 6455) **/
+
+		switch ( buffer[0]&0x0F /*OpCode*/){
 
 			case 1: // Text frame
 				iMaskingKey = 2;
@@ -553,7 +572,7 @@ void onRSReceiveEventHandler (dual_sock_conn* sockConn) {
 	char 			buffer[_BUFFER_SIZE];
 	unsigned int	i, bytesRecv, iPayloadData;
 
-	if (_VERBOSE_MODE) printf("[socket fd:%d]\tnew data from this raw socket was received\n", sockConn->fdr);
+	if (_VERBOSE_MODE) printf("[socket fd:%d]\tnew data from the raw socket was received\n", sockConn->fdr);
 
 	checkIfError(
 		bytesRecv = recv(sockConn->fdr, buffer, _BUFFER_SIZE, 0),
