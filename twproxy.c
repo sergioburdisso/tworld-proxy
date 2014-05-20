@@ -410,8 +410,7 @@ void closeWS (dual_sock_conn* sockConn) {
 				sockConn = &conns[i];
 				break;
 			}
-	}else
-		sockConn->fdw = sockConn->rtowBuffer[0] = 0;
+	}
 
 	if (sockConn->fdr){
 		char const* msg;
@@ -443,6 +442,8 @@ void closeWS (dual_sock_conn* sockConn) {
 
 		memcpy( sockConn->wtorBuffer, msg, strlen(msg) + 1 );
 	}
+
+	sockConn->fdw = sockConn->rtowBuffer[0] = 0;
 }
 
 // ready-to-receive (from WebSocket) event handler
