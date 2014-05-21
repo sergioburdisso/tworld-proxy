@@ -112,7 +112,7 @@ void onWSReceiveEventHandler		(dual_sock_conn*);				// ready-to-receive (from We
 void onRSReceiveEventHandler		(dual_sock_conn*);				// ready-to-receive (from raw socket) event handler
 void setNonBlockingFlag				(int);							// tells the kernel the socket linked to a fd is nonblocking
 void exit_twproxy					(int);							// proxy terminates its execution
-void checkIfError					(int, char const*, char const*);// checks if first argument is a negative number, prints an error and terminates execution
+void checkIfError					(int, char const*, char const*, bool);// checks if first argument is a negative number, prints an error and terminates execution
 void displayHelp					(char const*);					// prints the help dialog
 void closeWS						(dual_sock_conn*);				// sends a close frame to a certain WebSocket
 
@@ -178,7 +178,7 @@ int main (int argc, char const* argv[]) {
 					IPPROTO_TCP	/*actual transport protocol to be used (TCP)*/
 				);
 
-	checkIfError(fdServerSock, "socket", "somehow the Operating System is denying the creation of sockets for this process");
+	checkIfError(fdServerSock, "socket", "somehow the Operating System is denying the creation of sockets for this process", true);
 	setNonBlockingFlag(fdServerSock);
 
 	//initializing variables to have 0 values (avoiding garbage values)
@@ -206,7 +206,8 @@ int main (int argc, char const* argv[]) {
 		"        -If you have  recently  closed  another instance  of this program,\n"
 		"         your Operating  System could've put  the socket  into a TIME_WAIT\n"
 		"         state before finally closing it,  so wait a few  minutes  and try\n"
-		"         again" 
+		"         again",
+		true
 	);
 
 	checkIfError(
@@ -214,7 +215,8 @@ int main (int argc, char const* argv[]) {
 		//sets the number of pending connections that can be queued up to _QUEUE_LENGTH_
 		listen(fdServerSock, _QUEUE_LENGTH_),
 		"sock: listen",
-		"couldn't prepare the server for incoming connections"
+		"couldn't prepare the server for incoming connections",
+		true
 	);
 
 	printf("Tileworld proxy running on port %d\n\n", _PORT);
@@ -231,7 +233,8 @@ int main (int argc, char const* argv[]) {
 		checkIfError(
 			fdsReady = select(fdMax + 1, (fd_set *)&fdReadSocks, (fd_set *)&fdWriteSocks, NULL, NULL/*timeout*/),
 			"system: select",
-			"while trying to wait for sockets I/O events to happen"
+			"while trying to wait for sockets I/O events to happen",
+			true
 		);
 
 		//4) handles new connection (if necessary)
@@ -290,12 +293,16 @@ void displayHelp (char const* programName) {
 	exit(EXIT_SUCCESS);
 }
 
-// checks if first argument is a negative number, prints an error and terminates execution
-void checkIfError (int value, char const* origin, char const* msg) {
+// checks if first argument is a negative number, prints an error and terminates execution (if necessary)
+void checkIfError (int value, char const* origin, char const* msg, bool fatal) {
 	if (value < 0){
-		//fprintf (stderr, "%s: error:\n\t%s\n\n", origin, (msg!=NULL)? msg: "an unknown error has occurred"); <- not working on my Android device :(
-		printf("%s: error: %s.\n\n", origin, (msg!=NULL)? msg: "an unknown error has occurred");
-		exit_twproxy(EXIT_FAILURE);
+
+		if (fatal || _VERBOSE_MODE)
+			//fprintf (stderr, "%s: error:\n\t%s\n\n", origin, (msg!=NULL)? msg: "an unknown error has occurred"); <- not working on my Android device :(
+			printf("%s: error: %s.\n\n", origin, (msg!=NULL)? msg: "an unknown error has occurred");
+
+		if (fatal)
+			exit_twproxy(EXIT_FAILURE);
 	}
 }
 
@@ -359,8 +366,11 @@ void newConnectionEventHandler () {
 	checkIfError(
 		fdConnect = accept(fdServerSock, NULL/*client address (not necessary)*/, NULL),
 		"socket: connect",
-		"couldn't create the socket for a new connection"
+		"couldn't create the socket for a new connection",
+		false
 	);
+	// if there was an error
+	if (fdConnect < 0) return;
 
 	if (fdConnect > fdMax)
 		fdMax = fdConnect;
@@ -450,7 +460,8 @@ void closeWS (dual_sock_conn* sockConn) {
 void onWSReceiveEventHandler (dual_sock_conn* sockConn) {
 	char			buffer[_BUFFER_SIZE];
 	uint64_t		payloadLength;
-	unsigned int	i, bytesRecv;
+	int				bytesRecv;
+	unsigned int	i;
 	unsigned char	iMaskingKey, iPayloadData;
 
 	if (_VERBOSE_MODE) printf("[socket fd:%d]\tnew data from the WebSocket was received\n", sockConn->fdw);
@@ -458,11 +469,12 @@ void onWSReceiveEventHandler (dual_sock_conn* sockConn) {
 	checkIfError(
 		bytesRecv = recv(sockConn->fdw, buffer, _BUFFER_SIZE, 0),
 		"socket: recv",
-		"couldn't receive data"
+		"couldn't receive data",
+		false
 	);
 
 	// if the other side closed the socket
-	if (bytesRecv == 0)
+	if (bytesRecv <= 0)
 		closeWS(sockConn);
 	else if (_WS_TO_RS_FORWARDING) {
 		buffer[bytesRecv] = 0;
@@ -569,23 +581,25 @@ void onWSReceiveEventHandler (dual_sock_conn* sockConn) {
 
 // ready-to-receive (from raw socket) event handler
 void onRSReceiveEventHandler (dual_sock_conn* sockConn) {
-	int 			fdw_i= -1;
+	int 			bytesRecv, fdw_i= -1;
 	char 			buffer[_BUFFER_SIZE];
-	unsigned int	i, bytesRecv, iPayloadData;
+	unsigned int	i, iPayloadData;
 
 	if (_VERBOSE_MODE) printf("[socket fd:%d]\tnew data from the raw socket was received\n", sockConn->fdr);
 
 	checkIfError(
 		bytesRecv = recv(sockConn->fdr, buffer, _BUFFER_SIZE, 0),
 		"socket: recv",
-		"couldn't receive data"
+		"couldn't receive data from the raw socket",
+		false
 	);
 
 	// if the other side closed the socket
-	if (bytesRecv == 0){
+	if (bytesRecv <= 0){
 		if (_VERBOSE_MODE) printf("[socket fd:%d]\tother side closed the socket\n", sockConn->fdr);
 
 		close(sockConn->fdr);
+
 		if (sockConn->fdw){
 			char const* msg = "error('Program Agent was closed by the other side')";
 			sockConn->rtowBuffer[0] = 0x81;//1000 0001 i.e FIN-bit 0 0 0 Opcode(4 bits)
