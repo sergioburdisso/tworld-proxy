@@ -1,6 +1,8 @@
 /*
 twproxy.c
 
+TODO:: Hacer que cuando inice muestre la direccion IP local (la que se debe ingresar de forma remota para acceder)
+
 (Description)
 NOTE: fd stands for File Descriptor which is basically an index for a kernel-resident array data structure
 associated with this process used to keep track of all the buffer-based resources that the process is working with
@@ -599,6 +601,18 @@ void onRSReceiveEventHandler (dual_sock_conn* sockConn) {
 		if (_VERBOSE_MODE) printf("[socket fd:%d]\tother side closed the socket\n", sockConn->fdr);
 
 		close(sockConn->fdr);
+
+		//if this raw socket doesn't have a websocket to send the close message yet
+		if (!sockConn->fdw){
+			int i;
+			//try to find a free user for it
+			for (i=0; i < _MAX_CLIENT; ++i)
+				if ( !conns[i].fdr && conns[i].fdw ){
+					sockConn->fdr = sockConn->wtorBuffer[0] = 0;
+					sockConn = &conns[i];
+					break;
+				}
+		}
 
 		if (sockConn->fdw){
 			char const* msg = "error('Program Agent was closed by the other side')";
