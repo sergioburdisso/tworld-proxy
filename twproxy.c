@@ -150,7 +150,10 @@ int main (int argc, char const* argv[]) {
 	//prints program header
 	printf(
 		"Tileworld Proxy (version 1.0)\n"
-		"Copyright (c) 2014 Sergio Burdisso\n\n"
+		"Copyright (c) 2014 Sergio Burdisso\n"
+		"Tileworld Proxy comes with ABSOLUTELY NO WARRANTY. This is free software,\n"
+		"and you are welcome to redistribute it under certain conditions.\n"
+		"Please visit http://www.gnu.org/licenses/gpl-3.0.html for details.\n\n"
 	);
 
 	if (!_PORT){
