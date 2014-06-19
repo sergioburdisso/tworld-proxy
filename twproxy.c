@@ -1,30 +1,21 @@
 /*
-twproxy.c
-
-TODO:: Hacer que cuando inice muestre la direccion IP local (la que se debe ingresar de forma remota para acceder)
-
-(Description)
-NOTE: fd stands for File Descriptor which is basically an index for a kernel-resident array data structure
-associated with this process used to keep track of all the buffer-based resources that the process is working with
-
-Copyright (C) 2014 Burdisso Sergio. All rights reserved.
-
- //Original sources are available at https://
-
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
- */
-
-
+* twproxy.c
+*
+* Copyright (C) 2014 Burdisso Sergio (sergio.burdisso@gmail.com)
+*
+* This program is free software: you can redistribute it and/or modify
+* it under the terms of the GNU General Public License as published by
+* the Free Software Foundation, either version 3 of the License, or
+* (at your option) any later version.
+*
+* This program is distributed in the hope that it will be useful,
+* but WITHOUT ANY WARRANTY; without even the implied warranty of
+* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+* GNU General Public License for more details.
+*
+* You should have received a copy of the GNU General Public License
+* along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
 //
 // HEADERS
 //
@@ -48,7 +39,7 @@ Copyright (C) 2014 Burdisso Sergio. All rights reserved.
 #define _FD_MASK				0x7FFF
 #define _MAX_CLIENT				64
 #define _BUFFER_SIZE			16*1024//16KB
-#define _DEFAULT_PORT			80
+#define _DEFAULT_PORT			3313
 #define _QUEUE_LENGTH_			16
 #define _FD_HANDLED_FLAG		0x8000
 #define _XML_XSD_LOCATION		"./resrc/tw_msg.xsd"
@@ -62,6 +53,9 @@ Copyright (C) 2014 Burdisso Sergio. All rights reserved.
 typedef struct sockaddr_in sockaddr_in;
 typedef enum _bool {false=0, true=1} bool;
 typedef enum _format {JSON='{', XML='<', PROLOG=' ', UNKNOWN='\0'} data_format;
+
+//NOTE:	fd stands for File Descriptor which is basically an index for a kernel-resident array data structure
+//		associated with this process used to keep track of all the buffer-based resources that the process is working with
 
 //struct used to keep track of each (1:1) connection
 typedef struct _dual_sock_conn{

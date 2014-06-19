@@ -452,10 +452,5 @@ unsigned char* SHA1(const char* input, int len){
     SHA1Input(&sha, (const unsigned char*)input, len);
     SHA1Result(&sha, buf);
     
-    /*printf("Key hash =");
-    for (i=0; i<20; ++i)
-        printf(" %02X", buf[i]);
-    printf("\n");*/
-    
     return buf;
 }
