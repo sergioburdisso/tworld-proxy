@@ -62,13 +62,15 @@ typedef enum _format {JSON='{', XML='<', PROLOG=' ', UNKNOWN='\0'} data_format;
 
 //struct used to keep track of each (1:1) connection
 typedef struct _dual_sock_conn{
-	char		magic_string[128];// string that is used to link the agent program algorithm (raw socket) to the correct t-world agent program
+	char		magic_string[128];// string that is used to link the agent program algorithm (raw socket) to the right t-world agent program
+
 	uint16_t	fdw;			  // file descriptor assigned to the web socket (HANDLED bit + FD (15 bits))
-	uint16_t	fdr;			  // file descriptor assigned to the raw socket (HANDLED bit + FD (15 bits))
-	char*		wtorBuffer;		  // buffer used to send data from the WebSocket to the raw socket
 	char*		rtowBuffer;		  // buffer used to send data from the raw socket to the WebSocket
 	char*		towBuffer;		  // buffer used to send data (constant strings) from the server to the WebSocket
 	uint16_t	rtowLen;		  // number of bytes to be send from raw socket to WebSocket
+
+	uint16_t	fdr;			  // file descriptor assigned to the raw socket (HANDLED bit + FD (15 bits))
+	char*		wtorBuffer;		  // buffer used to send data from the WebSocket to the raw socket
 	data_format	wtorFormat;		  // format of data sent to the raw socket (JSON, XML, PROLOG)
 } dual_sock_conn;
 
@@ -111,8 +113,8 @@ void onWStoRSSendEventHandler		(dual_sock_conn*);				// ready-to-send (to raw so
 void onRStoWSSendEventHandler		(dual_sock_conn*);				// ready-to-send (to WebSocket) event handler
 void onWSReceiveEventHandler		(dual_sock_conn*);				// ready-to-receive (from WebSocket) event handler
 void onRSReceiveEventHandler		(dual_sock_conn*);				// ready-to-receive (from raw socket) event handler
+char* getConnectMagicString			(char*);						// returns the Magic String in case of a CONNECT message, NULL otherwise
 void setNonBlockingFlag				(int);							// tells the kernel the socket linked to a fd is nonblocking
-char* getConnectMessage				(char*);
 void exit_twproxy					(int);							// proxy terminates its execution
 void checkIfError					(int, char const*, char const*, bool);// checks if first argument is a negative number, prints an error and terminates execution
 void displayHelp					(char const*);					// prints the help dialog
@@ -247,8 +249,8 @@ int main (int argc, char const* argv[]) {
 
 		//5) handles current connections
 		for (i=0; i < _MAX_CLIENT; ++i){
-			//Note: the first bit of conns[i].fdw/u is a flag used to indicate whether
-			//      the fdw/u is new at conns[i] (and its events were previously handled)
+			//Note: the first bit of conns[i].fdw/r is a flag used to indicate whether
+			//      the fdw/r is new at conns[i] (and thus its events were previously handled)
 
 			//-> ready-to-receive event handlers
 			if ( !(conns[i].fdw&_FD_HANDLED_FLAG) && FD_ISSET(conns[i].fdw, &fdReadSocks) )
@@ -360,6 +362,27 @@ void resetAndSetFileDescriptorSets () {
 			FD_SET(conns[i].fdr, &fdReadSocks );
 			FD_SET(conns[i].fdr, &fdWriteSocks);
 		}
+	}
+}
+
+// returns the Magic String in case of a CONNECT message, NULL otherwise
+char* getConnectMagicString(char* msg){
+	int i, msg_len = strlen(msg);
+	int connect_len = strlen(_CONNECT_MESSAGE);
+	int _UpperCase = 'A' - 'a';
+	const char* CONNECT = _CONNECT_MESSAGE;
+
+	for (i= 0; i < msg_len && i < connect_len; ++i)
+		if ( msg[i] != CONNECT[i] && msg[i] + _UpperCase != CONNECT[i] )
+			return NULL;
+
+	if (i < connect_len)
+		return NULL;
+	else{
+		//trimming the magic string
+		for (i= msg_len; i-- && (msg[i] == '\n' || msg[i] == '\r' || msg[i] == ' ');)
+			msg[i] = '\0';
+		return msg + connect_len;
 	}
 }
 
@@ -564,14 +587,16 @@ void onWSReceiveEventHandler (dual_sock_conn* sockConn) {
 					sockConn->wtorBuffer[offset + payloadLength] = 0;
 
 					//if it is a "CONNECT" message
-					connectMsg = getConnectMessage(sockConn->wtorBuffer);
+					connectMsg = getConnectMagicString(sockConn->wtorBuffer);
 
 					if (connectMsg != NULL){
 						*(int *)sockConn->wtorBuffer = 0;
 
 						for (i=0; i < _MAX_CLIENT; ++i)
 							//if the i-th position is empty
-							if ( (!conns[i].fdr && !conns[i].fdw) || (conns[i].fdr && !conns[i].fdw && strcmp(connectMsg, conns[i].magic_string) == 0) ){
+							if ( (!conns[i].fdr && !conns[i].fdw) ||
+								(conns[i].fdr && !conns[i].fdw && strcmp(connectMsg, conns[i].magic_string) == 0))
+							{
 								conns[i].fdw = sockConn->fdw|_FD_HANDLED_FLAG;
 
 								//creating buffer on demand
@@ -597,7 +622,7 @@ void onWSReceiveEventHandler (dual_sock_conn* sockConn) {
 					if (!sockConn->fdr && _VERBOSE_MODE)
 						printf("[socket fd:%d]\tno raw socket to send data to\n", sockConn->fdw&_FD_MASK);
 				}else
-				//if FIN bit is 0
+					//if FIN bit is 0
 					if (offset == 0){
 						memcpy(sockConn->wtorBuffer + 1, buffer + iPayloadData + 1, payloadLength-1);
 						sockConn->wtorBuffer[payloadLength] = buffer[iPayloadData];
@@ -771,14 +796,16 @@ void onRSReceiveEventHandler (dual_sock_conn* sockConn) {
 
 			sockConn->rtowLen = iPayloadData + bytesRecv;
 			//sending data to the websocket asynchronously encapsulated in a websocket frame
-			char* connectMsg = getConnectMessage(buffer);
+			char* connectMsg = getConnectMagicString(buffer);
 
 			if (connectMsg != NULL){
 				sockConn->rtowBuffer[0] = 0;
 
 				for (i=0; i < _MAX_CLIENT; ++i)
 					//if the i-th position is empty
-					if ( (!conns[i].fdr && !conns[i].fdw) || (!conns[i].fdr && conns[i].fdw && strcmp(connectMsg, conns[i].magic_string) == 0) ){
+					if ( (!conns[i].fdr && !conns[i].fdw) || 
+						(!conns[i].fdr && conns[i].fdw && strcmp(connectMsg, conns[i].magic_string) == 0))
+					{
 						conns[i].fdr = sockConn->fdr|_FD_HANDLED_FLAG;
 
 						//creating buffer on demand
@@ -836,24 +863,4 @@ void onRStoWSSendEventHandler (dual_sock_conn* sockConn) {
 	}
 }
 
-char* getConnectMessage(char* msg){
-	int i, msg_len = strlen(msg);
-	int connect_len = strlen(_CONNECT_MESSAGE);
-	int _UpperCase = 'A' - 'a';
-	const char* CONNECT = _CONNECT_MESSAGE;
-
-	for (i= 0; i < msg_len && i < connect_len; ++i)
-		if ( msg[i] != CONNECT[i] && msg[i] + _UpperCase != CONNECT[i] )
-			return NULL;
-
-	if (i < connect_len)
-		return NULL;
-	else{
-		//trim
-		for (i= msg_len; i-- && (msg[i] == '\n' || msg[i] == '\r' || msg[i] == ' ');)
-			msg[i] = '\0';
-		return msg + connect_len;
-	}
-}
-
-//that's it! =D
+// ...and that's it! =D
