@@ -16,6 +16,7 @@
 * You should have received a copy of the GNU General Public License
 * along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
+
 //
 // HEADERS
 //
@@ -37,13 +38,14 @@
 // PREPROCESSOR-TIME CONSTANTS
 //
 #define _FD_MASK				0x7FFF
-#define _MAX_CLIENT				64
+#define _MAX_CLIENT				128
 #define _BUFFER_SIZE			16*1024//16KB
 #define _DEFAULT_PORT			3313
 #define _QUEUE_LENGTH_			16
 #define _FD_HANDLED_FLAG		0x8000
 #define _XML_XSD_LOCATION		"./resrc/tw_msg.xsd"
-#define _WS_CLOSED_MESSAGE		"Tileworld instance was closed by the other side"
+#define _WS_CONNECT_MESSAGE		"_CONNECTED_"
+#define _WS_CLOSED_MESSAGE		"T-World instance was closed by the other side"
 #define _WS_SPECIFICATION_GUID	"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
@@ -63,7 +65,8 @@ typedef struct _dual_sock_conn{
 	uint16_t	fdr;			// file descriptor assigned to the raw socket (HANDLED bit + FD (15 bits))
 	char*		wtorBuffer;		// buffer used to send data from the WebSocket to the raw socket
 	char*		rtowBuffer;		// buffer used to send data from the raw socket to the WebSocket
-	uint16_t	rtowLen;		// number of bytes to be send from WebSocket to raw socket
+	char*		towBuffer;		// buffer used to send data (constant strings) from the server to the WebSocket
+	uint16_t	rtowLen;		// number of bytes to be send from raw socket to WebSocket
 	data_format	wtorFormat;		// format of data sent to the raw socket (JSON, XML, PROLOG)
 } dual_sock_conn;
 
@@ -110,8 +113,8 @@ void setNonBlockingFlag				(int);							// tells the kernel the socket linked to
 void exit_twproxy					(int);							// proxy terminates its execution
 void checkIfError					(int, char const*, char const*, bool);// checks if first argument is a negative number, prints an error and terminates execution
 void displayHelp					(char const*);					// prints the help dialog
+void sendToWS						(dual_sock_conn*, char const*);	// sends a constant websocket message to a certain WebSocket
 void closeWS						(dual_sock_conn*);				// sends a close frame to a certain WebSocket
-
 
 //
 // FUNCTION DEFINITIONS
@@ -149,9 +152,9 @@ int main (int argc, char const* argv[]) {
 
 	//prints program header
 	printf(
-		"Tileworld Proxy (version 1.0)\n"
-		"Copyright (c) 2014 Sergio Burdisso\n"
-		"Tileworld Proxy comes with ABSOLUTELY NO WARRANTY. This is free software,\n"
+		"T-World Proxy (version 1.0)\n"
+		"Copyright (c) 2014 Burdisso Sergio\n"
+		"T-World Proxy comes with ABSOLUTELY NO WARRANTY. This is free software,\n"
 		"and you are welcome to redistribute it under certain conditions.\n"
 		"Please visit http://www.gnu.org/licenses/gpl-3.0.html for details.\n\n"
 	);
@@ -218,7 +221,7 @@ int main (int argc, char const* argv[]) {
 		true
 	);
 
-	printf("Tileworld proxy running on port %d\n\n", _PORT);
+	printf("T-World proxy running on port %d\n\n", _PORT);
 
 	fdMax = fdServerSock;
 
@@ -266,7 +269,7 @@ int main (int argc, char const* argv[]) {
 	return 0;
 }//main
 
-// Tileworld proxy terminates its execution
+// T-World proxy terminates its execution
 void exit_twproxy (int status) {
 	close(fdServerSock);
 	regfree(&regex_wsInitialMsg);
@@ -279,12 +282,12 @@ void displayHelp (char const* programName) {
 	printf(
 		"Usage: %s [OPTION]...\n\n"
 		"OPTIONS:\n\n"
-		"-p, --port <NUM>       Allow you to define the port number your Tileworld Proxy\n"
+		"-p, --port <NUM>       Allow you to define the port number your T-World Proxy\n"
 		"                       will listen on.  The port  number must be  between 1 and\n"
 		"                       65535.  If no value is provided, this property is set to\n"
 		"                       the default value of %d\n\n"
 		"-v, --verbose          Allow the application to display trace information\n\n"
-		"-n, --no-forwarding    Disable forwarding data coming from  the 3D Tileworld to\n"
+		"-n, --no-forwarding    Disable forwarding data coming from  the 3D T-World to\n"
 		"                       the user program\n\n"
 		"-?, --help             Display this help and exit\n\n",
 		programName, _DEFAULT_PORT
@@ -385,6 +388,8 @@ void newConnectionEventHandler () {
 			if (conns[i].wtorBuffer == NULL){
 				conns[i].wtorBuffer = (char *)calloc(sizeof(char), _BUFFER_SIZE);
 				conns[i].rtowBuffer = (char *)calloc(sizeof(char), _BUFFER_SIZE);
+				conns[i].towBuffer  = (char *)calloc(sizeof(char), 1024);
+				conns[i].towBuffer[0] = 0; 
 			}
 
 			if (_VERBOSE_MODE) printf("[server socket]\tnew connection accepted [new socket fd:%d]\n", fdConnect);
@@ -401,6 +406,15 @@ void newConnectionEventHandler () {
 		close(fdConnect);
 	}else
 		setNonBlockingFlag(fdConnect);
+}
+
+// sends a constant websocket message to a certain WebSocket
+void sendToWS(dual_sock_conn* sockConn, char const* msg){
+	if (sockConn->fdw){
+		sockConn->towBuffer[0] = 0x81;//1000 0001 i.e FIN-bit 0 0 0 Opcode(4 bits)
+		sockConn->towBuffer[1] = (unsigned char)strlen(msg);// Payload Len
+		memcpy( sockConn->towBuffer + 2, msg, (unsigned char)strlen(msg) + 1 );
+	}
 }
 
 // sends a close frame to a certain WebSocket
@@ -490,6 +504,8 @@ void onWSReceiveEventHandler (dual_sock_conn* sockConn) {
 					conns[i].fdw = sockConn->fdw|_FD_HANDLED_FLAG;
 					sockConn->fdw = 0;
 					sockConn = &conns[i];
+
+					sendToWS(sockConn, _WS_CONNECT_MESSAGE);
 					break;
 				}
 		}
@@ -607,17 +623,13 @@ void onRSReceiveEventHandler (dual_sock_conn* sockConn) {
 				if ( !conns[i].fdr && conns[i].fdw ){
 					sockConn->fdr = sockConn->wtorBuffer[0] = 0;
 					sockConn = &conns[i];
+
+					sendToWS(sockConn, _WS_CONNECT_MESSAGE);
 					break;
 				}
 		}
 
-		if (sockConn->fdw){
-			char const* msg = "error('Program Agent was closed by the other side')";
-			sockConn->rtowBuffer[0] = 0x81;//1000 0001 i.e FIN-bit 0 0 0 Opcode(4 bits)
-			sockConn->rtowBuffer[1] = (unsigned char)strlen(msg);// Payload Len
-			sockConn->rtowLen = 2 + sockConn->rtowBuffer[1];
-			memcpy( sockConn->rtowBuffer + 2, msg, sockConn->rtowBuffer[1] + 1 );
-		}
+		sendToWS(sockConn, "error('Program Agent was closed by the other side')");
 
 		sockConn->fdr = sockConn->wtorBuffer[0] = 0;
 	}else{
@@ -637,6 +649,9 @@ void onRSReceiveEventHandler (dual_sock_conn* sockConn) {
 					conns[i].fdw = sockConn->fdr|_FD_HANDLED_FLAG;
 					sockConn->fdr = 0;
 					sockConn = &conns[i];
+
+					sendToWS(sockConn, _WS_CONNECT_MESSAGE);
+
 					if (_VERBOSE_MODE) printf("[server socket]\tnew dual connection created (ws %d, rs %d)\n", sockConn->fdw&_FD_MASK, sockConn->fdr);
 					break;
 				}else
@@ -692,6 +707,8 @@ void onRSReceiveEventHandler (dual_sock_conn* sockConn) {
 						conns[i].fdr = sockConn->fdr|_FD_HANDLED_FLAG;
 						sockConn->fdr = 0;
 						sockConn = &conns[i];
+
+						sendToWS(sockConn, _WS_CONNECT_MESSAGE);
 						break;
 					}
 			}
@@ -737,6 +754,11 @@ void onRStoWSSendEventHandler (dual_sock_conn* sockConn) {
 		if (_VERBOSE_MODE) printf("[socket fd:%d]\tsends data to the WebSocket[%d]:\n%s\n", sockConn->fdr, sockConn->fdw&_FD_MASK, sockConn->rtowBuffer);
 		write(sockConn->fdw&_FD_MASK, sockConn->rtowBuffer, sockConn->rtowLen);//send
 		sockConn->rtowBuffer[0] = 0;
+	}
+	if (sockConn->towBuffer[0]){//constant string messages
+		if (_VERBOSE_MODE) printf("[server socket]\tsends constant messsage to the WebSocket[%d]:\n%s\n", sockConn->fdw&_FD_MASK, sockConn->towBuffer);
+		write(sockConn->fdw&_FD_MASK, sockConn->towBuffer, strlen(sockConn->towBuffer));//send
+		sockConn->towBuffer[0] = 0;
 	}
 }
 
