@@ -43,9 +43,10 @@
 #define _DEFAULT_PORT			3313
 #define _QUEUE_LENGTH_			16
 #define _FD_HANDLED_FLAG		0x8000
+#define _CONNECT_MESSAGE		"CONNECT:"
 #define _XML_XSD_LOCATION		"./resrc/tw_msg.xsd"
-#define _WS_CONNECT_MESSAGE		"_CONNECTED_"
 #define _WS_CLOSED_MESSAGE		"T-World instance was closed by the other side"
+#define _WS_CONNECT_MESSAGE		"_CONNECTED_"
 #define _WS_SPECIFICATION_GUID	"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
@@ -61,13 +62,14 @@ typedef enum _format {JSON='{', XML='<', PROLOG=' ', UNKNOWN='\0'} data_format;
 
 //struct used to keep track of each (1:1) connection
 typedef struct _dual_sock_conn{
-	uint16_t	fdw;			// file descriptor assigned to the web socket (HANDLED bit + FD (15 bits))
-	uint16_t	fdr;			// file descriptor assigned to the raw socket (HANDLED bit + FD (15 bits))
-	char*		wtorBuffer;		// buffer used to send data from the WebSocket to the raw socket
-	char*		rtowBuffer;		// buffer used to send data from the raw socket to the WebSocket
-	char*		towBuffer;		// buffer used to send data (constant strings) from the server to the WebSocket
-	uint16_t	rtowLen;		// number of bytes to be send from raw socket to WebSocket
-	data_format	wtorFormat;		// format of data sent to the raw socket (JSON, XML, PROLOG)
+	char		magic_string[128];// string that is used to link the agent program algorithm (raw socket) to the correct t-world agent program
+	uint16_t	fdw;			  // file descriptor assigned to the web socket (HANDLED bit + FD (15 bits))
+	uint16_t	fdr;			  // file descriptor assigned to the raw socket (HANDLED bit + FD (15 bits))
+	char*		wtorBuffer;		  // buffer used to send data from the WebSocket to the raw socket
+	char*		rtowBuffer;		  // buffer used to send data from the raw socket to the WebSocket
+	char*		towBuffer;		  // buffer used to send data (constant strings) from the server to the WebSocket
+	uint16_t	rtowLen;		  // number of bytes to be send from raw socket to WebSocket
+	data_format	wtorFormat;		  // format of data sent to the raw socket (JSON, XML, PROLOG)
 } dual_sock_conn;
 
 
@@ -110,12 +112,12 @@ void onRStoWSSendEventHandler		(dual_sock_conn*);				// ready-to-send (to WebSoc
 void onWSReceiveEventHandler		(dual_sock_conn*);				// ready-to-receive (from WebSocket) event handler
 void onRSReceiveEventHandler		(dual_sock_conn*);				// ready-to-receive (from raw socket) event handler
 void setNonBlockingFlag				(int);							// tells the kernel the socket linked to a fd is nonblocking
+char* getConnectMessage				(char*);
 void exit_twproxy					(int);							// proxy terminates its execution
 void checkIfError					(int, char const*, char const*, bool);// checks if first argument is a negative number, prints an error and terminates execution
 void displayHelp					(char const*);					// prints the help dialog
 void sendToWS						(dual_sock_conn*, char const*);	// sends a constant websocket message to a certain WebSocket
 void closeWS						(dual_sock_conn*);				// sends a close frame to a certain WebSocket
-
 //
 // FUNCTION DEFINITIONS
 //
@@ -389,6 +391,8 @@ void newConnectionEventHandler () {
 				conns[i].wtorBuffer = (char *)calloc(sizeof(char), _BUFFER_SIZE);
 				conns[i].rtowBuffer = (char *)calloc(sizeof(char), _BUFFER_SIZE);
 				conns[i].towBuffer  = (char *)calloc(sizeof(char), 1024);
+
+				conns[i].magic_string[0] = '\0';
 				conns[i].towBuffer[0] = 0; 
 			}
 
@@ -498,7 +502,9 @@ void onWSReceiveEventHandler (dual_sock_conn* sockConn) {
 		if (!sockConn->fdr){
 			for (i=0; i < _MAX_CLIENT; ++i)
 				//if a user is waiting for a web socket!
-				if ( !conns[i].fdw && conns[i].fdr ){
+				if ( !conns[i].fdw && conns[i].fdr && sockConn->magic_string[0] &&
+					!strcmp(sockConn->magic_string, conns[i].magic_string))
+				{
 					//1 bit is used as a flag to know that this ws is new at this
 					//i-th position and its ready-to-read event was already handled here
 					conns[i].fdw = sockConn->fdw|_FD_HANDLED_FLAG;
@@ -514,7 +520,10 @@ void onWSReceiveEventHandler (dual_sock_conn* sockConn) {
 
 		switch ( buffer[0]&0x0F /*OpCode*/){
 
-			case 1: // Text frame
+			case 1:{ // Text frame
+				unsigned int offset = strlen(sockConn->wtorBuffer + 1);
+				char head = sockConn->wtorBuffer[offset];
+
 				iMaskingKey = 2;
 
 				switch (buffer[1]&0x7F/*Payload len*/){
@@ -542,35 +551,64 @@ void onWSReceiveEventHandler (dual_sock_conn* sockConn) {
 				buffer[iPayloadData + payloadLength] = 0;
 
 				//sending data to the web socket asynchronously
-				if (sockConn->fdr){
-					unsigned int offset = strlen(sockConn->wtorBuffer + 1);
-					char head = sockConn->wtorBuffer[offset];
+				//if FIN bit is 1
+				if (buffer[0]&0x80){
+					char* connectMsg;
 
-					//if FIN bit is 1
-					if (buffer[0]&0x80){
-						if (offset == 0)
-							memcpy(sockConn->wtorBuffer, buffer + iPayloadData, payloadLength);
-						else{
-							memcpy(sockConn->wtorBuffer + offset, buffer + iPayloadData, payloadLength);
-							sockConn->wtorBuffer[0] = head;
-						}
-						sockConn->wtorBuffer[offset + payloadLength] = 0;
+					if (offset == 0)
+						memcpy(sockConn->wtorBuffer, buffer + iPayloadData, payloadLength);
+					else{
+						memcpy(sockConn->wtorBuffer + offset, buffer + iPayloadData, payloadLength);
+						sockConn->wtorBuffer[0] = head;
+					}
+					sockConn->wtorBuffer[offset + payloadLength] = 0;
+
+					//if it is a "CONNECT" message
+					connectMsg = getConnectMessage(sockConn->wtorBuffer);
+
+					if (connectMsg != NULL){
+						*(int *)sockConn->wtorBuffer = 0;
+
+						for (i=0; i < _MAX_CLIENT; ++i)
+							//if the i-th position is empty
+							if ( (!conns[i].fdr && !conns[i].fdw) || (conns[i].fdr && !conns[i].fdw && strcmp(connectMsg, conns[i].magic_string) == 0) ){
+								conns[i].fdw = sockConn->fdw|_FD_HANDLED_FLAG;
+
+								//creating buffer on demand
+								if (conns[i].wtorBuffer == NULL){
+									conns[i].wtorBuffer = (char *)calloc(sizeof(char), _BUFFER_SIZE);
+									conns[i].rtowBuffer = (char *)calloc(sizeof(char), _BUFFER_SIZE);
+									conns[i].towBuffer  = (char *)calloc(sizeof(char), 1024);
+
+									conns[i].magic_string[0] = '\0';
+									conns[i].towBuffer[0] = 0; 
+								}
+
+								sockConn->fdw = 0;
+								sockConn = &conns[i];
+
+								if (conns[i].fdr)
+									sendToWS(sockConn, _WS_CONNECT_MESSAGE);
+								break;
+							}
+
+						strcpy(sockConn->magic_string, connectMsg);
 					}else
-					//if FIN bit is 0
-
-						if (offset == 0){
-							memcpy(sockConn->wtorBuffer + 1, buffer + iPayloadData + 1, payloadLength-1);
-							sockConn->wtorBuffer[payloadLength] = buffer[iPayloadData];
-							sockConn->wtorBuffer[payloadLength + 1] = 0;
-						}else{
-							memcpy(sockConn->wtorBuffer + offset, buffer + iPayloadData, payloadLength);
-							sockConn->wtorBuffer[offset + payloadLength] = head;
-							sockConn->wtorBuffer[offset + payloadLength+ 1] = 0;
-						}
+					if (!sockConn->fdr && _VERBOSE_MODE)
+						printf("[socket fd:%d]\tno raw socket to send data to\n", sockConn->fdw&_FD_MASK);
 				}else
-					if (_VERBOSE_MODE) printf("[socket fd:%d]\tno raw socket to send data to\n", sockConn->fdw&_FD_MASK);
+				//if FIN bit is 0
+					if (offset == 0){
+						memcpy(sockConn->wtorBuffer + 1, buffer + iPayloadData + 1, payloadLength-1);
+						sockConn->wtorBuffer[payloadLength] = buffer[iPayloadData];
+						sockConn->wtorBuffer[payloadLength + 1] = 0;
+					}else{
+						memcpy(sockConn->wtorBuffer + offset, buffer + iPayloadData, payloadLength);
+						sockConn->wtorBuffer[offset + payloadLength] = head;
+						sockConn->wtorBuffer[offset + payloadLength+ 1] = 0;
+					}
 				break;
-
+			}
 			case 8: //Close frame
 				closeWS(sockConn);
 				break;
@@ -620,7 +658,9 @@ void onRSReceiveEventHandler (dual_sock_conn* sockConn) {
 			int i;
 			//try to find a free user for it
 			for (i=0; i < _MAX_CLIENT; ++i)
-				if ( !conns[i].fdr && conns[i].fdw ){
+				if ( !conns[i].fdr && conns[i].fdw && sockConn->magic_string[0] &&
+					!strcmp(sockConn->magic_string, conns[i].magic_string))
+				{
 					sockConn->fdr = sockConn->wtorBuffer[0] = 0;
 					sockConn = &conns[i];
 
@@ -643,7 +683,8 @@ void onRSReceiveEventHandler (dual_sock_conn* sockConn) {
 
 			for (i=0; i < _MAX_CLIENT; ++i)
 				// if a user is waiting for a web socket!
-				if ( (conns[i].fdr && !conns[i].fdw) && (conns[i].fdr != sockConn->fdr) ){
+				if ( (conns[i].fdr && !conns[i].fdw) && (conns[i].fdr != sockConn->fdr) &&
+					sockConn->magic_string[0] && !strcmp(sockConn->magic_string, conns[i].magic_string)){
 					//1 bit is used as a flag to know that this ws is new at this
 					//i-th position and its ready-to-read event was already handled here
 					conns[i].fdw = sockConn->fdr|_FD_HANDLED_FLAG;
@@ -701,7 +742,9 @@ void onRSReceiveEventHandler (dual_sock_conn* sockConn) {
 			if (!sockConn->fdw){
 				for (i=0; i < _MAX_CLIENT; ++i)
 					//if a raw socket is waiting for a web socket!
-					if ( !conns[i].fdr && conns[i].fdw ){
+					if ( !conns[i].fdr && conns[i].fdw && sockConn->magic_string[0] &&
+						!strcmp(sockConn->magic_string, conns[i].magic_string))
+					{
 						//1 bit is used as a flag to know that this rs is new at this
 						//i-th position and its ready-to-read event was already handled here
 						conns[i].fdr = sockConn->fdr|_FD_HANDLED_FLAG;
@@ -728,6 +771,34 @@ void onRSReceiveEventHandler (dual_sock_conn* sockConn) {
 
 			sockConn->rtowLen = iPayloadData + bytesRecv;
 			//sending data to the websocket asynchronously encapsulated in a websocket frame
+			char* connectMsg = getConnectMessage(buffer);
+
+			if (connectMsg != NULL){
+				sockConn->rtowBuffer[0] = 0;
+
+				for (i=0; i < _MAX_CLIENT; ++i)
+					//if the i-th position is empty
+					if ( (!conns[i].fdr && !conns[i].fdw) || (!conns[i].fdr && conns[i].fdw && strcmp(connectMsg, conns[i].magic_string) == 0) ){
+						conns[i].fdr = sockConn->fdr|_FD_HANDLED_FLAG;
+
+						//creating buffer on demand
+						if (conns[i].wtorBuffer == NULL){
+							conns[i].wtorBuffer = (char *)calloc(sizeof(char), _BUFFER_SIZE);
+							conns[i].rtowBuffer = (char *)calloc(sizeof(char), _BUFFER_SIZE);
+							conns[i].towBuffer  = (char *)calloc(sizeof(char), 1024);
+
+							conns[i].magic_string[0] = '\0';
+							conns[i].towBuffer[0] = 0; 
+						}
+
+						sockConn->fdr = 0;
+						sockConn = &conns[i];
+
+						sendToWS(sockConn, _WS_CONNECT_MESSAGE);
+						break;
+					}
+				strcpy(sockConn->magic_string, connectMsg);
+			}else
 			if (sockConn->fdw)
 				memcpy(sockConn->rtowBuffer + iPayloadData, buffer, bytesRecv + 1);
 			else
@@ -750,15 +821,38 @@ void onWStoRSSendEventHandler (dual_sock_conn* sockConn) {
 
 // ready-to-send (to WebSocket) event handler
 void onRStoWSSendEventHandler (dual_sock_conn* sockConn) {
+	//Raw socket to websocket messages
 	if (sockConn->rtowBuffer[0]){
 		if (_VERBOSE_MODE) printf("[socket fd:%d]\tsends data to the WebSocket[%d]:\n%s\n", sockConn->fdr, sockConn->fdw&_FD_MASK, sockConn->rtowBuffer);
 		write(sockConn->fdw&_FD_MASK, sockConn->rtowBuffer, sockConn->rtowLen);//send
 		sockConn->rtowBuffer[0] = 0;
 	}
-	if (sockConn->towBuffer[0]){//constant string messages
+
+	//constant string messages
+	if (sockConn->towBuffer[0]){
 		if (_VERBOSE_MODE) printf("[server socket]\tsends constant messsage to the WebSocket[%d]:\n%s\n", sockConn->fdw&_FD_MASK, sockConn->towBuffer);
 		write(sockConn->fdw&_FD_MASK, sockConn->towBuffer, strlen(sockConn->towBuffer));//send
 		sockConn->towBuffer[0] = 0;
+	}
+}
+
+char* getConnectMessage(char* msg){
+	int i, msg_len = strlen(msg);
+	int connect_len = strlen(_CONNECT_MESSAGE);
+	int _UpperCase = 'A' - 'a';
+	const char* CONNECT = _CONNECT_MESSAGE;
+
+	for (i= 0; i < msg_len && i < connect_len; ++i)
+		if ( msg[i] != CONNECT[i] && msg[i] + _UpperCase != CONNECT[i] )
+			return NULL;
+
+	if (i < connect_len)
+		return NULL;
+	else{
+		//trim
+		for (i= msg_len; i-- && (msg[i] == '\n' || msg[i] == '\r' || msg[i] == ' ');)
+			msg[i] = '\0';
+		return msg + connect_len;
 	}
 }
 
