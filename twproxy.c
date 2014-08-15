@@ -47,6 +47,7 @@
 #define _XML_XSD_LOCATION		"./resrc/tw_msg.xsd"
 #define _WS_CLOSED_MESSAGE		"T-World instance was closed by the other side"
 #define _WS_CONNECT_MESSAGE		"_CONNECTED_"
+#define _WS_DISCONNECT_MESSAGE	"_DISCONNECTED_"
 #define _WS_SPECIFICATION_GUID	"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
@@ -120,6 +121,7 @@ void checkIfError					(int, char const*, char const*, bool);// checks if first a
 void displayHelp					(char const*);					// prints the help dialog
 void sendToWS						(dual_sock_conn*, char const*);	// sends a constant websocket message to a certain WebSocket
 void closeWS						(dual_sock_conn*);				// sends a close frame to a certain WebSocket
+bool istrcmp						(const char*, const char*);					//case insensitive string comparison used for detecting the magic string 
 //
 // FUNCTION DEFINITIONS
 //
@@ -131,7 +133,7 @@ int main (int argc, char const* argv[]) {
 
 	//handles the input options
 	for (i=1; i < argc; ++i){
-		if (!strcmp(argv[i], "--port") || !strcmp(argv[i], "-p")){
+		if (!istrcmp(argv[i], "--port") || !istrcmp(argv[i], "-p")){
 			//if port number is not valid (or empty)
 			if (i+1 >= argc || atoi(argv[i+1]) < 1){
 				perror("error: the port number must be between 1 and 65535\n");
@@ -139,13 +141,13 @@ int main (int argc, char const* argv[]) {
 			}
 			_PORT = atoi(argv[++i]);
 		}else
-		if (!strcmp(argv[i], "--verbose") || !strcmp(argv[i], "-v"))
+		if (!istrcmp(argv[i], "--verbose") || !istrcmp(argv[i], "-v"))
 			_VERBOSE_MODE = true;
 		else
-		if (!strcmp(argv[i], "--no-forwarding") || !strcmp(argv[i], "-n"))
+		if (!istrcmp(argv[i], "--no-forwarding") || !istrcmp(argv[i], "-n"))
 			_WS_TO_RS_FORWARDING = false;
 		else
-		if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-?"))
+		if (!istrcmp(argv[i], "--help") || !istrcmp(argv[i], "-?"))
 			displayHelp(argv[0]);
 		else{
 			//fprintf(stderr, "%s: invalid option '%s'\n\n", argv[0], argv[i]);
@@ -526,7 +528,7 @@ void onWSReceiveEventHandler (dual_sock_conn* sockConn) {
 			for (i=0; i < _MAX_CLIENT; ++i)
 				//if a user is waiting for a web socket!
 				if ( !conns[i].fdw && conns[i].fdr && sockConn->magic_string[0] &&
-					!strcmp(sockConn->magic_string, conns[i].magic_string))
+					!istrcmp(sockConn->magic_string, conns[i].magic_string))
 				{
 					//1 bit is used as a flag to know that this ws is new at this
 					//i-th position and its ready-to-read event was already handled here
@@ -595,7 +597,7 @@ void onWSReceiveEventHandler (dual_sock_conn* sockConn) {
 						for (i=0; i < _MAX_CLIENT; ++i)
 							//if the i-th position is empty
 							if ( (!conns[i].fdr && !conns[i].fdw) ||
-								(conns[i].fdr && !conns[i].fdw && strcmp(connectMsg, conns[i].magic_string) == 0))
+								(conns[i].fdr && !conns[i].fdw && istrcmp(connectMsg, conns[i].magic_string) == 0))
 							{
 								conns[i].fdw = sockConn->fdw|_FD_HANDLED_FLAG;
 
@@ -684,17 +686,17 @@ void onRSReceiveEventHandler (dual_sock_conn* sockConn) {
 			//try to find a free user for it
 			for (i=0; i < _MAX_CLIENT; ++i)
 				if ( !conns[i].fdr && conns[i].fdw && sockConn->magic_string[0] &&
-					!strcmp(sockConn->magic_string, conns[i].magic_string))
+					!istrcmp(sockConn->magic_string, conns[i].magic_string))
 				{
 					sockConn->fdr = sockConn->wtorBuffer[0] = 0;
 					sockConn = &conns[i];
 
-					sendToWS(sockConn, _WS_CONNECT_MESSAGE);
+					///sendToWS(sockConn, _WS_CONNECT_MESSAGE);
 					break;
 				}
 		}
 
-		sendToWS(sockConn, "error('Program Agent was closed by the other side')");
+		sendToWS(sockConn, _WS_DISCONNECT_MESSAGE);
 
 		sockConn->fdr = sockConn->wtorBuffer[0] = 0;
 	}else{
@@ -709,7 +711,7 @@ void onRSReceiveEventHandler (dual_sock_conn* sockConn) {
 			for (i=0; i < _MAX_CLIENT; ++i)
 				// if a user is waiting for a web socket!
 				if ( (conns[i].fdr && !conns[i].fdw) && (conns[i].fdr != sockConn->fdr) &&
-					sockConn->magic_string[0] && !strcmp(sockConn->magic_string, conns[i].magic_string)){
+					sockConn->magic_string[0] && !istrcmp(sockConn->magic_string, conns[i].magic_string)){
 					//1 bit is used as a flag to know that this ws is new at this
 					//i-th position and its ready-to-read event was already handled here
 					conns[i].fdw = sockConn->fdr|_FD_HANDLED_FLAG;
@@ -768,7 +770,7 @@ void onRSReceiveEventHandler (dual_sock_conn* sockConn) {
 				for (i=0; i < _MAX_CLIENT; ++i)
 					//if a raw socket is waiting for a web socket!
 					if ( !conns[i].fdr && conns[i].fdw && sockConn->magic_string[0] &&
-						!strcmp(sockConn->magic_string, conns[i].magic_string))
+						!istrcmp(sockConn->magic_string, conns[i].magic_string))
 					{
 						//1 bit is used as a flag to know that this rs is new at this
 						//i-th position and its ready-to-read event was already handled here
@@ -804,7 +806,7 @@ void onRSReceiveEventHandler (dual_sock_conn* sockConn) {
 				for (i=0; i < _MAX_CLIENT; ++i)
 					//if the i-th position is empty
 					if ( (!conns[i].fdr && !conns[i].fdw) || 
-						(!conns[i].fdr && conns[i].fdw && strcmp(connectMsg, conns[i].magic_string) == 0))
+						(!conns[i].fdr && conns[i].fdw && istrcmp(connectMsg, conns[i].magic_string) == 0))
 					{
 						conns[i].fdr = sockConn->fdr|_FD_HANDLED_FLAG;
 
@@ -861,6 +863,21 @@ void onRStoWSSendEventHandler (dual_sock_conn* sockConn) {
 		write(sockConn->fdw&_FD_MASK, sockConn->towBuffer, strlen(sockConn->towBuffer));//send
 		sockConn->towBuffer[0] = 0;
 	}
+}
+
+//case insensitive string comparison used for detecting the magic string 
+bool istrcmp(const char* str0, const char* str1){
+	int len = strlen(str0);
+	int _str1_len = strlen(str1);
+	int _UpperCase = 'A' - 'a';
+
+	if (len != _str1_len)
+		return false;
+
+	while (len--)
+		if ( str0[len] != str1[len] && str0[len] + _UpperCase != str1[len] )
+			return false;
+	return true;
 }
 
 // ...and that's it! =D
