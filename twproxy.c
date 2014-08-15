@@ -116,12 +116,16 @@ void onWSReceiveEventHandler		(dual_sock_conn*);				// ready-to-receive (from We
 void onRSReceiveEventHandler		(dual_sock_conn*);				// ready-to-receive (from raw socket) event handler
 char* getConnectMagicString			(char*);						// returns the Magic String in case of a CONNECT message, NULL otherwise
 void setNonBlockingFlag				(int);							// tells the kernel the socket linked to a fd is nonblocking
-void exit_twproxy					(int);							// proxy terminates its execution
-void checkIfError					(int, char const*, char const*, bool);// checks if first argument is a negative number, prints an error and terminates execution
-void displayHelp					(char const*);					// prints the help dialog
 void sendToWS						(dual_sock_conn*, char const*);	// sends a constant websocket message to a certain WebSocket
 void closeWS						(dual_sock_conn*);				// sends a close frame to a certain WebSocket
-bool istrcmp						(const char*, const char*);					//case insensitive string comparison used for detecting the magic string 
+
+void exit_twproxy					(int);							// proxy terminates its execution
+void checkIfError					(int,char const*,char const*,bool);// checks if first argument is a negative number, prints an error and terminates execution
+void displayHelp					(char const*);					// prints the help dialog
+char toLowerCase					(char);							//convert a character from upper case to lower case
+bool istrcmp						(const char*, const char*);		//case insensitive string comparison (e.g. used for detecting the magic string) 
+
+
 //
 // FUNCTION DEFINITIONS
 //
@@ -133,7 +137,7 @@ int main (int argc, char const* argv[]) {
 
 	//handles the input options
 	for (i=1; i < argc; ++i){
-		if (!istrcmp(argv[i], "--port") || !istrcmp(argv[i], "-p")){
+		if (istrcmp(argv[i], "--port") || istrcmp(argv[i], "-p")){
 			//if port number is not valid (or empty)
 			if (i+1 >= argc || atoi(argv[i+1]) < 1){
 				perror("error: the port number must be between 1 and 65535\n");
@@ -141,13 +145,13 @@ int main (int argc, char const* argv[]) {
 			}
 			_PORT = atoi(argv[++i]);
 		}else
-		if (!istrcmp(argv[i], "--verbose") || !istrcmp(argv[i], "-v"))
+		if (istrcmp(argv[i], "--verbose") || istrcmp(argv[i], "-v"))
 			_VERBOSE_MODE = true;
 		else
-		if (!istrcmp(argv[i], "--no-forwarding") || !istrcmp(argv[i], "-n"))
+		if (istrcmp(argv[i], "--no-forwarding") || istrcmp(argv[i], "-n"))
 			_WS_TO_RS_FORWARDING = false;
 		else
-		if (!istrcmp(argv[i], "--help") || !istrcmp(argv[i], "-?"))
+		if (istrcmp(argv[i], "--help") || istrcmp(argv[i], "-?"))
 			displayHelp(argv[0]);
 		else{
 			//fprintf(stderr, "%s: invalid option '%s'\n\n", argv[0], argv[i]);
@@ -314,6 +318,24 @@ void checkIfError (int value, char const* origin, char const* msg, bool fatal) {
 	}
 }
 
+//convert a character from upper case to lower case
+char toLowerCase(char c){ return (('A' <= c && c <= 'Z')? c + ('a' - 'A') : c);}
+
+//case insensitive string comparison (e.g. used for detecting the magic string) 
+bool istrcmp(const char* str0, const char* str1){
+	int len = strlen(str0);
+	int _UpperCase = 'A' - 'a';
+
+	if (len != strlen(str1))
+		return false;
+
+	while (len--)
+		if ( toLowerCase(str0[len]) != toLowerCase(str1[len]) )
+			return false;
+
+	return true;
+}
+
 // "tells the Kernel that this process does not need to wait for (block until) this socket to complete reading/writing"
 void setNonBlockingFlag (int fdSock) {
 	int flags;
@@ -371,11 +393,10 @@ void resetAndSetFileDescriptorSets () {
 char* getConnectMagicString(char* msg){
 	int i, msg_len = strlen(msg);
 	int connect_len = strlen(_CONNECT_MESSAGE);
-	int _UpperCase = 'A' - 'a';
 	const char* CONNECT = _CONNECT_MESSAGE;
 
 	for (i= 0; i < msg_len && i < connect_len; ++i)
-		if ( msg[i] != CONNECT[i] && msg[i] + _UpperCase != CONNECT[i] )
+		if ( toLowerCase(msg[i]) != toLowerCase(CONNECT[i]) )
 			return NULL;
 
 	if (i < connect_len)
@@ -528,7 +549,7 @@ void onWSReceiveEventHandler (dual_sock_conn* sockConn) {
 			for (i=0; i < _MAX_CLIENT; ++i)
 				//if a user is waiting for a web socket!
 				if ( !conns[i].fdw && conns[i].fdr && sockConn->magic_string[0] &&
-					!istrcmp(sockConn->magic_string, conns[i].magic_string))
+					istrcmp(sockConn->magic_string, conns[i].magic_string))
 				{
 					//1 bit is used as a flag to know that this ws is new at this
 					//i-th position and its ready-to-read event was already handled here
@@ -593,31 +614,37 @@ void onWSReceiveEventHandler (dual_sock_conn* sockConn) {
 
 					if (connectMsg != NULL){
 						*(int *)sockConn->wtorBuffer = 0;
-
-						for (i=0; i < _MAX_CLIENT; ++i)
+						int newPos= -1;
+						for (i=0; i < _MAX_CLIENT; ++i){
 							//if the i-th position is empty
-							if ( (!conns[i].fdr && !conns[i].fdw) ||
-								(conns[i].fdr && !conns[i].fdw && istrcmp(connectMsg, conns[i].magic_string) == 0))
-							{
-								conns[i].fdw = sockConn->fdw|_FD_HANDLED_FLAG;
+							if ( (!conns[i].fdr && !conns[i].fdw) && newPos == -1 )
+								newPos = i;
 
-								//creating buffer on demand
-								if (conns[i].wtorBuffer == NULL){
-									conns[i].wtorBuffer = (char *)calloc(sizeof(char), _BUFFER_SIZE);
-									conns[i].rtowBuffer = (char *)calloc(sizeof(char), _BUFFER_SIZE);
-									conns[i].towBuffer  = (char *)calloc(sizeof(char), 1024);
-
-									conns[i].magic_string[0] = '\0';
-									conns[i].towBuffer[0] = 0; 
-								}
-
-								sockConn->fdw = 0;
-								sockConn = &conns[i];
-
-								if (conns[i].fdr)
-									sendToWS(sockConn, _WS_CONNECT_MESSAGE);
+							if	(conns[i].fdr && !conns[i].fdw && istrcmp(connectMsg, conns[i].magic_string)){
+								newPos = i;
 								break;
 							}
+						}
+
+						if (newPos != -1){
+							conns[newPos].fdw = sockConn->fdw|_FD_HANDLED_FLAG;
+
+							//creating buffer on demand
+							if (conns[newPos].wtorBuffer == NULL){
+								conns[newPos].wtorBuffer = (char *)calloc(sizeof(char), _BUFFER_SIZE);
+								conns[newPos].rtowBuffer = (char *)calloc(sizeof(char), _BUFFER_SIZE);
+								conns[newPos].towBuffer  = (char *)calloc(sizeof(char), 1024);
+
+								conns[newPos].magic_string[0] = '\0';
+								conns[newPos].towBuffer[0] = 0; 
+							}
+
+							sockConn->fdw = 0;
+							sockConn = &conns[newPos];
+
+							if (conns[newPos].fdr)
+								sendToWS(sockConn, _WS_CONNECT_MESSAGE);
+						}
 
 						strcpy(sockConn->magic_string, connectMsg);
 					}else
@@ -686,7 +713,7 @@ void onRSReceiveEventHandler (dual_sock_conn* sockConn) {
 			//try to find a free user for it
 			for (i=0; i < _MAX_CLIENT; ++i)
 				if ( !conns[i].fdr && conns[i].fdw && sockConn->magic_string[0] &&
-					!istrcmp(sockConn->magic_string, conns[i].magic_string))
+					istrcmp(sockConn->magic_string, conns[i].magic_string))
 				{
 					sockConn->fdr = sockConn->wtorBuffer[0] = 0;
 					sockConn = &conns[i];
@@ -711,7 +738,7 @@ void onRSReceiveEventHandler (dual_sock_conn* sockConn) {
 			for (i=0; i < _MAX_CLIENT; ++i)
 				// if a user is waiting for a web socket!
 				if ( (conns[i].fdr && !conns[i].fdw) && (conns[i].fdr != sockConn->fdr) &&
-					sockConn->magic_string[0] && !istrcmp(sockConn->magic_string, conns[i].magic_string)){
+					sockConn->magic_string[0] && istrcmp(sockConn->magic_string, conns[i].magic_string)){
 					//1 bit is used as a flag to know that this ws is new at this
 					//i-th position and its ready-to-read event was already handled here
 					conns[i].fdw = sockConn->fdr|_FD_HANDLED_FLAG;
@@ -770,7 +797,7 @@ void onRSReceiveEventHandler (dual_sock_conn* sockConn) {
 				for (i=0; i < _MAX_CLIENT; ++i)
 					//if a raw socket is waiting for a web socket!
 					if ( !conns[i].fdr && conns[i].fdw && sockConn->magic_string[0] &&
-						!istrcmp(sockConn->magic_string, conns[i].magic_string))
+						istrcmp(sockConn->magic_string, conns[i].magic_string))
 					{
 						//1 bit is used as a flag to know that this rs is new at this
 						//i-th position and its ready-to-read event was already handled here
@@ -802,30 +829,36 @@ void onRSReceiveEventHandler (dual_sock_conn* sockConn) {
 
 			if (connectMsg != NULL){
 				sockConn->rtowBuffer[0] = 0;
-
-				for (i=0; i < _MAX_CLIENT; ++i)
+				int newPos = -1;
+				for (i=0; i < _MAX_CLIENT; ++i){
 					//if the i-th position is empty
-					if ( (!conns[i].fdr && !conns[i].fdw) || 
-						(!conns[i].fdr && conns[i].fdw && istrcmp(connectMsg, conns[i].magic_string) == 0))
-					{
-						conns[i].fdr = sockConn->fdr|_FD_HANDLED_FLAG;
+					if ( (!conns[i].fdr && !conns[i].fdw) && newPos == -1)
+						newPos = i;
 
-						//creating buffer on demand
-						if (conns[i].wtorBuffer == NULL){
-							conns[i].wtorBuffer = (char *)calloc(sizeof(char), _BUFFER_SIZE);
-							conns[i].rtowBuffer = (char *)calloc(sizeof(char), _BUFFER_SIZE);
-							conns[i].towBuffer  = (char *)calloc(sizeof(char), 1024);
-
-							conns[i].magic_string[0] = '\0';
-							conns[i].towBuffer[0] = 0; 
-						}
-
-						sockConn->fdr = 0;
-						sockConn = &conns[i];
-
-						sendToWS(sockConn, _WS_CONNECT_MESSAGE);
+					if	(!conns[i].fdr && conns[i].fdw && istrcmp(connectMsg, conns[i].magic_string)){
+						newPos = i;
 						break;
 					}
+				}
+
+				if (newPos != -1){
+					conns[newPos].fdr = sockConn->fdr|_FD_HANDLED_FLAG;
+
+					//creating buffer on demand
+					if (conns[newPos].wtorBuffer == NULL){
+						conns[newPos].wtorBuffer = (char *)calloc(sizeof(char), _BUFFER_SIZE);
+						conns[newPos].rtowBuffer = (char *)calloc(sizeof(char), _BUFFER_SIZE);
+						conns[newPos].towBuffer  = (char *)calloc(sizeof(char), 1024);
+
+						conns[newPos].magic_string[0] = '\0';
+						conns[newPos].towBuffer[0] = 0; 
+					}
+
+					sockConn->fdr = 0;
+					sockConn = &conns[newPos];
+
+					sendToWS(sockConn, _WS_CONNECT_MESSAGE);
+				}
 				strcpy(sockConn->magic_string, connectMsg);
 			}else
 			if (sockConn->fdw)
@@ -863,21 +896,6 @@ void onRStoWSSendEventHandler (dual_sock_conn* sockConn) {
 		write(sockConn->fdw&_FD_MASK, sockConn->towBuffer, strlen(sockConn->towBuffer));//send
 		sockConn->towBuffer[0] = 0;
 	}
-}
-
-//case insensitive string comparison used for detecting the magic string 
-bool istrcmp(const char* str0, const char* str1){
-	int len = strlen(str0);
-	int _str1_len = strlen(str1);
-	int _UpperCase = 'A' - 'a';
-
-	if (len != _str1_len)
-		return false;
-
-	while (len--)
-		if ( str0[len] != str1[len] && str0[len] + _UpperCase != str1[len] )
-			return false;
-	return true;
 }
 
 // ...and that's it! =D
