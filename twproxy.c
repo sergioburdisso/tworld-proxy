@@ -340,10 +340,12 @@ bool istrcmp(const char* str0, const char* str1){
 void setNonBlockingFlag (int fdSock) {
 	int flags;
 
+	setsockopt(fdSock, IPPROTO_TCP, TCP_NODELAY, (char *) &flags, sizeof(int));
+
 	//getting the flags associated with the socket
 	//from the Kernel's File Descriptors array assigned to this process
 	//using fdSock as index
-	flags = fcntl(fdSock,F_GETFL);
+	//flags = fcntl(fdSock,F_GETFL);
 	if (flags < 0) {
 		perror("fcntl: error: cant get the socket flags (F_GETFL) from the kernel-resident file descriptors array related to this process");
 		exit_twproxy(EXIT_FAILURE);
@@ -355,6 +357,7 @@ void setNonBlockingFlag (int fdSock) {
 		perror("fcntl: error: cant set the socket flags (F_SETFL) in the kernel-resident file descriptors array related to this process");
 		exit_twproxy(EXIT_FAILURE);
 	}
+
 }
 
 // Initializes the file descriptor sets (used for select()-ing the sockets we take care of)
@@ -596,7 +599,6 @@ void onWSReceiveEventHandler (dual_sock_conn* sockConn) {
 
 				buffer[iPayloadData + payloadLength] = 0;
 
-				//sending data to the web socket asynchronously
 				//if FIN bit is 1
 				if (buffer[0]&0x80){
 					char* connectMsg;
@@ -889,7 +891,6 @@ void onRStoWSSendEventHandler (dual_sock_conn* sockConn) {
 		write(sockConn->fdw&_FD_MASK, sockConn->rtowBuffer, sockConn->rtowLen);//send
 		sockConn->rtowBuffer[0] = 0;
 	}
-
 	//constant string messages
 	if (sockConn->towBuffer[0]){
 		if (_VERBOSE_MODE) printf("[server socket]\tsends constant messsage to the WebSocket[%d]:\n%s\n", sockConn->fdw&_FD_MASK, sockConn->towBuffer);
