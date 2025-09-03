@@ -1,6 +1,6 @@
 # WebSocket Proxy for T-World
 
-> For **Windows users** there's an already compiled `.exe` file available in the [bin/v1.0](bin/v1.0) folder.
+> For **Windows users** there's an already compiled `.exe` file available in the [bin/v1.0](bin/v1.0) folder _(which you can directly download from [here](https://sergioburdisso.github.io/tworld/resrc/twproxy.zip))_.
 
 1. Compile with:
 ```bash

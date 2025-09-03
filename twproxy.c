@@ -96,7 +96,7 @@ dual_sock_conn conns[_MAX_CLIENT];  // array of paired connections (webSocket, u
 regmatch_t matchs[4];               // stores the substrings matching the subpatterns (within regex_wsInitialMsg)
 unsigned char* KeyHash;             // Stores the SHA1(fullWebSocketKey) 160 bits value for the server handshake replay
 char fullWebSocketKey[60];          // Sec-WebSocket-Key base64-encoded value (when decoded, is 16 bytes in length)
-char handshakeMessage[126];         // Stores the full handshake message to be sent to the WebSocket
+char handshakeMessage[1024];         // Stores the full handshake message to be sent to the WebSocket
 char secWebsocketAccept[29];        // Stores the Base64(SHA-1(fullWebSocketKey))
 regex_t regex_wsInitialMsg;         // compiled regular expression for detecting websocket handshake from web browser
 
@@ -767,21 +767,26 @@ void onRSReceiveEventHandler (dual_sock_conn* sockConn) {
             }
 
             //WEBSOCKET OPENING HANDSHAKE [RFC 6455 4.2.1-2]
+            if (_VERBOSE_MODE) printf("[websocket]\tproceding with opening handshake...\n");
             //1) capturing the Sec-WebSocket-Key value (stores it in fullWebSocketKey)
+            if (_VERBOSE_MODE) printf("[websocket]\t\tcapturing the sec-websocket-key value\n");
             if (matchs[2].rm_so == -1)
                 memcpy((void *)&matchs[2], (void *)&matchs[3], sizeof(regmatch_t));
             memcpy(fullWebSocketKey, buffer + matchs[2].rm_so, 24);
 
             //2) concatenating fullWebSocketKey with the GUID "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+            if (_VERBOSE_MODE) printf("[websocket]\t\tconcatenating with GUID\n");
             memcpy(fullWebSocketKey + 24, _WS_SPECIFICATION_GUID, 36);
 
             //3)  taking the SHA-1 hash of this concatenated value to obtain a 20-byte value
+            if (_VERBOSE_MODE) printf("[websocket]\t\tcomputing SHA-1 hash\n");
             KeyHash = SHA1(fullWebSocketKey, 60);
 
             //4) and base64-encoding this 20-byte hash
             base64encode(KeyHash , 20, secWebsocketAccept, 29);
 
             //5) sending the handshake message to the web socket asynchronously
+            if (_VERBOSE_MODE) printf("[websocket]\t\tsending handshake message\n");
             strcpy(
                 handshakeMessage,
                 "HTTP/1.1 101 Switching Protocols\r\n"
