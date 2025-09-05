@@ -74,6 +74,7 @@ typedef struct _dual_sock_conn{
     uint16_t    fdr;              // file descriptor assigned to the raw socket (HANDLED bit + FD (15 bits))
     char*       wtorBuffer;       // buffer used to send data from the WebSocket to the raw socket
     data_format wtorFormat;       // format of data sent to the raw socket (JSON, XML, PROLOG)
+    uint16_t    wtorLen;          // number of bytes received from WebSocket
 } dual_sock_conn;
 
 
@@ -168,12 +169,14 @@ int main (int argc, char const* argv[]) {
         "T-World Proxy comes with ABSOLUTELY NO WARRANTY. This is free software,\n"
         "and you are welcome to redistribute it under certain conditions.\n"
         "Please visit http://www.gnu.org/licenses/gpl-3.0.html for details.\n\n"
+        "Use -? or --help to display available command line options.\n\n"
     );
-
     if (!_PORT){
-        printf("No port number was provided (using the default value %d)\n\n", _DEFAULT_PORT);
+        printf("[info] No port specified via -p/--port. Falling back to default port %d.\n", _DEFAULT_PORT);
         _PORT = _DEFAULT_PORT;
     }
+
+    printf("[info] Preparing to start server...\n");
 
     //compiles the regular expression used to parse the websocket opening handshake message
     regcomp(
@@ -232,7 +235,7 @@ int main (int argc, char const* argv[]) {
         true
     );
 
-    printf("T-World proxy running on port %d\n\n", _PORT);
+    printf("[info] Server running at: ws://localhost:%d (binding to 0.0.0.0)\n", _PORT);
 
     fdMax = fdServerSock;
 
@@ -312,7 +315,7 @@ void checkIfError (int value, char const* origin, char const* msg, bool fatal) {
 
         if (fatal || _VERBOSE_MODE)
             //fprintf (stderr, "%s: error:\n\t%s\n\n", origin, (msg!=NULL)? msg: "an unknown error has occurred"); <- not working on my Android device :(
-            printf("%s: error: %s.\n\n", origin, (msg!=NULL)? msg: "an unknown error has occurred");
+            printf("[error] %s: %s.\n\n", origin, (msg!=NULL)? msg: "an unknown error has occurred");
 
         if (fatal)
             exit_twproxy(EXIT_FAILURE);
@@ -444,6 +447,7 @@ void newConnectionEventHandler () {
 
                 conns[i].magic_string[0] = '\0';
                 conns[i].towBuffer[0] = 0; 
+                conns[i].wtorLen = 0;
             }
 
             if (_VERBOSE_MODE) printf("[server socket]\tnew connection accepted [new socket fd:%d]\n", fdConnect);
@@ -473,9 +477,9 @@ void sendToWS(dual_sock_conn* sockConn, char const* msg){
 
 // sends a close frame to a certain WebSocket
 void closeWS (dual_sock_conn* sockConn) {
-    if (_VERBOSE_MODE) printf("[socket fd:%d]\tother side closed the socket\n", sockConn->fdw);
+    if (_VERBOSE_MODE) printf("[websocket fd:%d]\tother side closed the WebSocket\n", sockConn->fdw&_FD_MASK);
 
-    close(sockConn->fdw);
+    close(sockConn->fdw&_FD_MASK);
 
     //if this websocket doesn't have a user to send the close message
     if (!sockConn->fdr){
@@ -495,9 +499,9 @@ void closeWS (dual_sock_conn* sockConn) {
         switch(sockConn->wtorFormat){
 
             case JSON:
-                msg =   "{\"header\":\"error\",\"data\":\""_WS_CLOSED_MESSAGE"\"}";
+                msg =   "{\"header\":\"error\",\"data\":\""_WS_CLOSED_MESSAGE"\"}\n";
                 break;
-            
+
             case XML:
                 msg =   "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
                         "<tw_msg "
@@ -505,11 +509,11 @@ void closeWS (dual_sock_conn* sockConn) {
                         "xsi:noNamespaceSchemaLocation=\""_XML_XSD_LOCATION"\">"
                         "<header>error</header>"
                         "<desc>"_WS_CLOSED_MESSAGE"</desc>"
-                        "</tw_msg>";
+                        "</tw_msg>\n";
                 break;
-            
+
             case UNKNOWN:
-                msg =   "error: "_WS_CLOSED_MESSAGE;
+                msg =   "error: "_WS_CLOSED_MESSAGE"\n";
                 break;
 
             //case PROLOG:
@@ -525,28 +529,36 @@ void closeWS (dual_sock_conn* sockConn) {
 
 // ready-to-receive (from WebSocket) event handler
 void onWSReceiveEventHandler (dual_sock_conn* sockConn) {
-    char            buffer[_BUFFER_SIZE];
+    char* buffer = (char *)sockConn->wtorBuffer + 1;  // to keep the leading 0 (= not ready to send flag)
     uint64_t        payloadLength;
     int             bytesRecv;
     unsigned int    i;
     unsigned char   iMaskingKey, iPayloadData;
 
-    if (_VERBOSE_MODE) printf("[socket fd:%d]\tnew data from the WebSocket was received\n", sockConn->fdw);
+    if (_VERBOSE_MODE){
+        printf("[websocket fd:%d]\tnew data from the WebSocket was received\n", sockConn->fdw);
+        if (sockConn->wtorLen > 0) {
+            printf("[websocket fd:%d]\t [continuation of previous frame (%d bytes)]\n", sockConn->fdw, sockConn->wtorLen);
+        }
+    }
 
     checkIfError(
-        bytesRecv = recv(sockConn->fdw, buffer, _BUFFER_SIZE, 0),
+        bytesRecv = recv(sockConn->fdw, buffer + sockConn->wtorLen, _BUFFER_SIZE, 0),
         "socket: recv",
         "couldn't receive data",
         false
     );
+    sockConn->wtorLen += bytesRecv;
 
     // if the other side closed the socket
-    if (bytesRecv <= 0)
+    if (bytesRecv <= 0) {
         closeWS(sockConn);
-    else if (_WS_TO_RS_FORWARDING) {
-        buffer[bytesRecv] = 0;
+    } else if (_WS_TO_RS_FORWARDING) {
+        buffer[sockConn->wtorLen] = 0;
 
-        if (_VERBOSE_MODE) printf("[socket fd:%d]\tdata is:\n%s\n", sockConn->fdw, buffer);
+        if (_VERBOSE_MODE){
+            printf("[websocket fd:%d]\t(%d bytes received)\n", sockConn->fdw&_FD_MASK, bytesRecv);
+        }
 
         //if this websocket doesn't have a user to exchange data with, try to find a free user for it
         if (!sockConn->fdr){
@@ -568,11 +580,10 @@ void onWSReceiveEventHandler (dual_sock_conn* sockConn) {
 
         /** WEBSOCKET MESSAGE (see section 5 "Data Framing" from the RFC 6455) **/
 
-        switch ( buffer[0]&0x0F /*OpCode*/){
+        switch (buffer[0] & 0x0F/*OpCode*/){
 
             case 1:{ // Text frame
-                unsigned int offset = strlen(sockConn->wtorBuffer + 1);
-                char head = sockConn->wtorBuffer[offset];
+                if (_VERBOSE_MODE) printf("\t> type: text frame\n");
 
                 iMaskingKey = 2;
 
@@ -588,7 +599,15 @@ void onWSReceiveEventHandler (dual_sock_conn* sockConn) {
                     default:
                         payloadLength = buffer[1]&0x7F;
                 }
+                if (_VERBOSE_MODE) printf("\t> payload length: %d\n", (int)payloadLength);
                 iPayloadData = iMaskingKey + 4;// 4 bytes = 32 bits
+
+                if (sockConn->wtorLen < payloadLength + iPayloadData) {
+                    if (_VERBOSE_MODE)
+                        printf("\t* (no payload sent, waiting for more data. Received %d bytes, need %d bytes...)\n",
+                               sockConn->wtorLen, (int)(payloadLength + iPayloadData));
+                    return;
+                }
 
                 //IF MASK bit
                 if (buffer[1]&0x80)
@@ -599,18 +618,15 @@ void onWSReceiveEventHandler (dual_sock_conn* sockConn) {
                     error "client messages must be masked*/
 
                 buffer[iPayloadData + payloadLength] = 0;
+                if (_VERBOSE_MODE) printf("\t> FIN bit: %d\n", (buffer[0]&0x80) != 0);
+                if (_VERBOSE_MODE) printf("\t> unmasked buffer data: %s\n", buffer);
 
                 //if FIN bit is 1
-                if (buffer[0]&0x80){
+                if (buffer[0] & 0x80){
                     char* connectMsg;
 
-                    if (offset == 0)
-                        memcpy(sockConn->wtorBuffer, buffer + iPayloadData, payloadLength);
-                    else{
-                        memcpy(sockConn->wtorBuffer + offset, buffer + iPayloadData, payloadLength);
-                        sockConn->wtorBuffer[0] = head;
-                    }
-                    sockConn->wtorBuffer[offset + payloadLength] = 0;
+                    memcpy(sockConn->wtorBuffer, buffer + iPayloadData, payloadLength);
+                    sockConn->wtorBuffer[payloadLength] = 0;
 
                     //if it is a "CONNECT" message
                     connectMsg = getConnectMagicString(sockConn->wtorBuffer);
@@ -640,33 +656,35 @@ void onWSReceiveEventHandler (dual_sock_conn* sockConn) {
 
                                 conns[newPos].magic_string[0] = '\0';
                                 conns[newPos].towBuffer[0] = 0; 
+                                conns[newPos].wtorLen = 0;
                             }
 
                             sockConn->fdw = 0;
+                            sockConn->wtorLen = 0;
                             sockConn = &conns[newPos];
 
-                            if (conns[newPos].fdr)
+                            if (conns[newPos].fdr){
                                 sendToWS(sockConn, _WS_CONNECT_MESSAGE);
+                            }
                         }
 
                         strcpy(sockConn->magic_string, connectMsg);
                     }else
                     if (!sockConn->fdr && _VERBOSE_MODE)
                         printf("[socket fd:%d]\tno raw socket to send data to\n", sockConn->fdw&_FD_MASK);
-                }else
-                    //if FIN bit is 0
-                    if (offset == 0){
-                        memcpy(sockConn->wtorBuffer + 1, buffer + iPayloadData + 1, payloadLength-1);
-                        sockConn->wtorBuffer[payloadLength] = buffer[iPayloadData];
-                        sockConn->wtorBuffer[payloadLength + 1] = 0;
-                    }else{
-                        memcpy(sockConn->wtorBuffer + offset, buffer + iPayloadData, payloadLength);
-                        sockConn->wtorBuffer[offset + payloadLength] = head;
-                        sockConn->wtorBuffer[offset + payloadLength+ 1] = 0;
-                    }
+                }else{
+                    // FIN bit = 0 (fragmented message). Fragmentation not supported -> discard.
+                    if (_VERBOSE_MODE)
+                        printf("\t[warning] fragmented WebSocket frame received (FIN=0, payload %u bytes). "
+                               "Message fragmentation is not supported; discarding this frame.\n",
+                               (unsigned)payloadLength);
+                    sockConn->wtorLen = 0;
+                    sockConn->wtorBuffer[0] = 0;
+                }
                 break;
             }
             case 8: //Close frame
+                if (_VERBOSE_MODE) printf("[websocket fd:%d]\tclose frame. Closing the WebSocket\n", sockConn->fdw&_FD_MASK);
                 closeWS(sockConn);
                 break;
 
@@ -732,7 +750,7 @@ void onRSReceiveEventHandler (dual_sock_conn* sockConn) {
     }else{
         buffer[bytesRecv] = 0;
 
-        if (_VERBOSE_MODE) printf("[socket fd:%d]\tdata is:\n%s\n", sockConn->fdr, buffer);
+        if (_VERBOSE_MODE) printf("[socket fd:%d]\t%d bytes received:\n%s\n", sockConn->fdr, bytesRecv, buffer);
 
         // if what we have received is a web socket message
         if ( !regexec(&regex_wsInitialMsg, buffer, regex_wsInitialMsg.re_nsub+1, matchs, 0) ){
@@ -767,26 +785,26 @@ void onRSReceiveEventHandler (dual_sock_conn* sockConn) {
             }
 
             //WEBSOCKET OPENING HANDSHAKE [RFC 6455 4.2.1-2]
-            if (_VERBOSE_MODE) printf("[websocket]\tproceding with opening handshake...\n");
+            if (_VERBOSE_MODE) printf("\t[websocket]\tcreating handshake message...\n");
             //1) capturing the Sec-WebSocket-Key value (stores it in fullWebSocketKey)
-            if (_VERBOSE_MODE) printf("[websocket]\t\tcapturing the sec-websocket-key value\n");
+            if (_VERBOSE_MODE) printf("\t[websocket]\t\tcapturing the Sec-WebSocket-Key value\n");
             if (matchs[2].rm_so == -1)
                 memcpy((void *)&matchs[2], (void *)&matchs[3], sizeof(regmatch_t));
             memcpy(fullWebSocketKey, buffer + matchs[2].rm_so, 24);
 
             //2) concatenating fullWebSocketKey with the GUID "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-            if (_VERBOSE_MODE) printf("[websocket]\t\tconcatenating with GUID\n");
+            if (_VERBOSE_MODE) printf("\t[websocket]\t\tconcatenating with GUID\n");
             memcpy(fullWebSocketKey + 24, _WS_SPECIFICATION_GUID, 36);
 
             //3)  taking the SHA-1 hash of this concatenated value to obtain a 20-byte value
-            if (_VERBOSE_MODE) printf("[websocket]\t\tcomputing SHA-1 hash\n");
+            if (_VERBOSE_MODE) printf("\t[websocket]\t\tcomputing SHA-1 hash\n");
             KeyHash = SHA1(fullWebSocketKey, 60);
 
             //4) and base64-encoding this 20-byte hash
             base64encode(KeyHash , 20, secWebsocketAccept, 29);
 
             //5) sending the handshake message to the web socket asynchronously
-            if (_VERBOSE_MODE) printf("[websocket]\t\tsending handshake message\n");
+            if (_VERBOSE_MODE) printf("\t[websocket]\tsending handshake message\n");
             strcpy(
                 handshakeMessage,
                 "HTTP/1.1 101 Switching Protocols\r\n"
@@ -860,6 +878,7 @@ void onRSReceiveEventHandler (dual_sock_conn* sockConn) {
 
                         conns[newPos].magic_string[0] = '\0';
                         conns[newPos].towBuffer[0] = 0; 
+                        conns[newPos].wtorLen = 0;
                     }
 
                     sockConn->fdr = 0;
@@ -886,6 +905,7 @@ void onWStoRSSendEventHandler (dual_sock_conn* sockConn) {
 
         write(sockConn->fdr&_FD_MASK, sockConn->wtorBuffer, strlen(sockConn->wtorBuffer));//send
         *(int *)sockConn->wtorBuffer = 0;
+        sockConn->wtorLen = 0;
     }
 }
 
