@@ -674,10 +674,9 @@ void onWSReceiveEventHandler (dual_sock_conn* sockConn) {
                         printf("[socket fd:%d]\tno raw socket to send data to\n", sockConn->fdw&_FD_MASK);
                 }else{
                     // FIN bit = 0 (fragmented message). Fragmentation not supported -> discard.
-                    if (_VERBOSE_MODE)
-                        printf("\t[warning] fragmented WebSocket frame received (FIN=0, payload %u bytes). "
-                               "Message fragmentation is not supported; discarding this frame.\n",
-                               (unsigned)payloadLength);
+                    printf("\t[warning] fragmented WebSocket frame received (FIN=0, payload %u bytes). "
+                           "Message fragmentation is not supported; discarding this frame.\n",
+                           (unsigned)payloadLength);
                     sockConn->wtorLen = 0;
                     sockConn->wtorBuffer[0] = 0;
                 }
